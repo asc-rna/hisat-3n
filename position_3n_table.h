@@ -193,7 +193,7 @@ public:
     char lastBase = 'X'; // the last base of reference line. this is for CG_only mode.
     SafeQueue<string*> linePool; // pool to store unprocessed SAM line.
     SafeQueue<string*> freeLinePool; // pool to store free string pointer for SAM line.
-    SafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
+    UnsafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
     SafeQueue<Position*> outputPositionPool; // pool to store the reference position which is loaded and ready to output.
     bool working;
     mutex mutex_;
@@ -342,7 +342,7 @@ public:
                           << to_string(pos->convertedQualities.size()) << '\t'
                           << pos->unconvertedQualities << '\t'
                           << to_string(pos->unconvertedQualities.size()) << '\n';
-                returnPosition(pos);
+                delete pos;
             } else {
                 this_thread::sleep_for (std::chrono::microseconds(1));
             }

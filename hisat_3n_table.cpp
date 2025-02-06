@@ -32,7 +32,7 @@ bool uniqueOnly = false;
 bool multipleOnly = false;
 bool CG_only = false;
 int nThreads = 1;
-long long int loadingBlockSize = 1000000;
+long long int loadingBlockSize = 100000;
 char convertFrom = '0';
 char convertTo = '0';
 char convertFromComplement;
@@ -342,9 +342,6 @@ int hisat_3n_table()
         this_thread::sleep_for (std::chrono::microseconds(100));
     }
     // stop all thread and clean
-    while(positions->freeLinePool.popFront(line)) {
-        delete line;
-    }
     positions->working = false;
     for (int i = 0; i < nThreads; i++){
         workers[i]->join();
@@ -355,8 +352,10 @@ int hisat_3n_table()
     return 0;
 }
 
+
 int main(int argc, const char** argv)
 {
+    ios::sync_with_stdio(false);
     int ret = 0;
 
     try {

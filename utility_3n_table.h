@@ -189,6 +189,58 @@ public:
  * simple safe queue
  */
 template <typename T>
+class UnsafeQueue {
+private:
+    queue<T> queue_;
+
+    string getReadName(string* line){
+        int startPosition = 0;
+        int endPosition;
+
+        endPosition = line->find("\t", startPosition);
+        string readName = line->substr(startPosition, endPosition - startPosition);
+        return readName;
+    }
+
+public:
+
+
+
+    int size() {
+
+        int s = queue_.size();
+        return s;
+    }
+
+    /**
+     * return true if the queue is not empty and pop front and get value.
+     * return false if the queue is empty.
+     */
+    bool popFront(T& value) {
+
+        bool isEmpty = queue_.empty();
+        if (!isEmpty) {
+            value = queue_.front();
+            queue_.pop();
+        }
+        return !isEmpty;
+    }
+
+    void push(T value) {
+
+        queue_.push(value);
+
+    }
+
+    bool empty() {
+
+        bool check = queue_.empty();
+
+        return check;
+    }
+};
+
+template <typename T>
 class SafeQueue {
 private:
     mutex mutex_;
@@ -218,9 +270,7 @@ public:
     }
 
     int size() {
-        mutex_.lock();
         int s = queue_.size();
-        mutex_.unlock();
         return s;
     }
 

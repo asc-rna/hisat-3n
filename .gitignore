@@ -44,3 +44,5 @@ docs/.*-cache
 *.tar.gz
 *.ipynb
 *.pyc
+
+hisat-3n-table
