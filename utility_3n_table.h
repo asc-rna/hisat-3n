@@ -334,6 +334,9 @@ public:
         pos.push_back(ChromosomeFilePosition(chromosome, linePos));
     }
 
+    const string& getChromesomeString(int index) {
+        return pos[index].chromosome;
+    }
     /**
      * make binary search on pos for target chromosome name
      */
