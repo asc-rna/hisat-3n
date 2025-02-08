@@ -33,6 +33,7 @@ using namespace std;
 extern bool CG_only;
 extern long long int loadingBlockSize;
 
+
 /**
  * store unique information for one base information with readID, and the quality.
  */
@@ -58,7 +59,7 @@ public:
  * basic class to store reference position information
  */
 class Position{
-    mutex mutex_;
+    // mutex mutex_;
 public:
     // string chromosome; // reference chromosome name
     short chromosomeId;
@@ -66,8 +67,8 @@ public:
     char strand; // +(REF) or -(REF-RC)
     // string convertedQualities; // each char is a mapping quality on this position for converted base.
     // string unconvertedQualities; // each char is a mapping quality on this position for unconverted base.
-    int convertedCount = 0;
-    int unconvertedCount = 0;
+    unsigned short convertedCount = 0;
+    unsigned short unconvertedCount = 0;
     bool empty = true;
     // vector<uniqueID> uniqueIDs; // each value represent a readName which contributed the base information.
     //                           // readNameIDs is to make sure no read contribute 2 times in same position.
@@ -198,7 +199,10 @@ public:
  */
 class Positions{
 public:
-    vector<Position*> refPositions; // the pool of all current reference position.
+    // vector<Position*> refPositions; // the pool of all current reference position.
+    vector<Position> ToOutRefPositions; // the pool of all current reference position.
+    vector<Position> refPositions;
+
     string chromosome; // current reference chromosome name.'
     int curChromosomeId;
     long long int location; // current location (position) in reference chromosome.
@@ -217,7 +221,20 @@ public:
     bool addedChrName = false;
     bool removedChrName = false;
 
-    Positions(string inputRefFileName, int inputNThreads, bool inputAddedChrName, bool inputRemovedChrName) {
+
+    bool output = false;
+    bool finalOut = false;
+
+    thread* outputThread;
+    ofstream tableFile;
+
+    Alignment tmpAlignment;
+
+    
+    
+    
+
+    Positions(string inputRefFileName, int inputNThreads, bool inputAddedChrName, bool inputRemovedChrName,string outputFileName) {
         working = true;
         nThreads = inputNThreads;
         addedChrName = inputAddedChrName;
@@ -227,23 +244,86 @@ public:
         }
         refFile.open(inputRefFileName, ios_base::in);
         LoadChromosomeNamesPos();
+
+        if (!outputFileName.empty()) {
+            tableFile.open(outputFileName, ios_base::out );
+            tableFile << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
+        }
     }
 
     ~Positions() {
         for (int i = 0; i < workerLock.size(); i++) {
             delete workerLock[i];
         }
+
+        tableFile.close();
+
         Position* pos;
         while(freePositionPool.popFront(pos)) {
             delete pos;
         }
     }
 
+    void startOutput(bool final_ = false){
+
+
+
+        if (refPositions.empty()) {
+            return;
+        }
+
+
+
+        
+        if (!ToOutRefPositions.empty()) {
+
+        for (Position& pos:ToOutRefPositions){
+            pos.initialize();
+        }
+        auto start = ToOutRefPositions.begin() ;
+        auto end =  ToOutRefPositions.end();
+        refPositions.insert(refPositions.end(), std::make_move_iterator(start), std::make_move_iterator(end));    
+        ToOutRefPositions.erase(start, end);
+        }
+        
+
+        if (!final_){
+
+        auto start = refPositions.begin() ;
+        auto end =  refPositions.begin() + loadingBlockSize;
+        // 使用 std::move 移动元素到 destination
+        ToOutRefPositions.insert(ToOutRefPositions.end(), std::make_move_iterator(start), std::make_move_iterator(end));
+        // 清除原 vector 中的这部分元素
+        refPositions.erase(start, end);
+
+        // printf("ToOutRefPositions size: %d\n", ToOutRefPositions.size());
+        // printf("refPositions size: %d\n", refPositions.size());
+
+        // for (int i=0;i<ToOutRefPositions.size();i++){
+        //     printf("ToOutRefPositions[%d]: %d\n", i, ToOutRefPositions[i]->location);
+        //     delete ToOutRefPositions[i];
+        // }
+        // ToOutRefPositions.clear();
+        } else {
+            std::swap(refPositions, ToOutRefPositions);
+            refPositions.clear();
+        }
+        long outLimitPos = refCoveredPosition - loadingBlockSize;
+
+
+        outputOnce(outLimitPos, final_);
+
+        if (final_) ToOutRefPositions.clear();
+
+
+    }
+
+
     /**
      * given the target Position output the corresponding position index in refPositions.
      */
     int getIndex(long long int &targetPos) {
-        int firstPos = refPositions[0]->location;
+        int firstPos = refPositions[0].location;
         return targetPos - firstPos;
     }
 
@@ -296,36 +376,35 @@ public:
     /**
      * get a fasta line (not header), append the bases to positions.
      */
-    inline void appendRefPosition(string& line) {
+    inline void appendRefPosition(string& line,int& cur) {
         
         // check the base one by one
         int len = line.size();
 
-        refPositions.reserve(refPositions.size() + len);
-        
+
         Position* newPos;
 
-        #pragma unroll
+        #pragma unroll(60)
         for (int i = 0; i < len; i++) {
-            getFreePosition(newPos);
-            newPos->set(curChromosomeId, location+i);
+            
+            refPositions[cur + i].set(curChromosomeId, location+i);
             char b = line[i];
-            if (CG_only) {
-                if (lastBase == 'C' && b == 'G') {
-                    refPositions.back()->set('+');
-                    newPos->set('-');
-                }
-            } else {
+            // if (CG_only) {
+            //     if (lastBase == 'C' && b == 'G') {
+            //         refPositions[.back()]->set('+');
+            //         newPos->set('-');
+            //     }
+            // } else {
                 if (b == convertFrom) {
-                    newPos->set('+');
+                    refPositions[cur+i].set('+');
                 } else if (b == convertFromComplement) {
-                    newPos->set('-');
+                    refPositions[cur+i].set('-');
                 }
-            }
-            refPositions.push_back(newPos);
+            // }
             lastBase = b;
         }
         location += len;
+        cur += len;
     }
 
     /**
@@ -341,76 +420,157 @@ public:
     /**
      * the output function for output thread.
      */
-    void outputFunction(string outputFileName) {
-        ostream* out_ = &cout;
-        out_ = &cout;
-        ofstream tableFile;
-        if (!outputFileName.empty()) {
-            tableFile.open(outputFileName, ios_base::out);
-            out_ = &tableFile;
-        }
 
-        // *out_ << "ref\tpos\tstrand\tconvertedBaseQualities\tconvertedBaseCount\tunconvertedBaseQualities\tunconvertedBaseCount\n";
+    inline void outputPosition(Position* pos,ostream* out_) {
 
-        *out_ << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
-        Position* pos;
-        while (working) {
-            if (outputPositionPool.popFront(pos)) {
-                const string& chr = chromosomePos.getChromesomeString(pos->chromosomeId);
-                *out_ << chr << '\t'
-                          << to_string(pos->location) << '\t'
-                          << pos->strand << '\t'
-                          << pos->convertedCount << '\t'
-                          << pos->unconvertedCount << '\n';
-                delete pos;
-            } else {
-                this_thread::sleep_for (std::chrono::microseconds(1));
-            }
-        }
-        tableFile.close();
     }
 
-    /**
-     * move the position which position smaller than refCoveredPosition - loadingBlockSize, output it.
-     */
-    void moveBlockToOutput() {
-        if (refPositions.empty()) {
-            return;
+    int outputOnce(long outLimitPos, bool final_=false) {
+        if (ToOutRefPositions.empty()) {
+            return 0;
         }
-        int index;
-        int len = refPositions.size();
-        for (index = 0; index < len; index++) {
-            if (refPositions[index]->location < refCoveredPosition - loadingBlockSize) {
-                if (refPositions[index]->isEmpty() || refPositions[index]->strand == '?') {
-                    returnPosition(refPositions[index]);
-                } else {
-                    outputPositionPool.push(refPositions[index]);
-                }
+        int i;
+        for (i = 0; i < ToOutRefPositions.size(); i++){
+            Position& pos = ToOutRefPositions[i];
+
+            if (final_ || pos.location <= outLimitPos){
+
+        
+            if (pos.isEmpty() || pos.strand == '?') {
+
+            }
+            
+            else {
+            const string& chr = chromosomePos.getChromesomeString(pos.chromosomeId);
+            tableFile << chr << '\t'
+                << to_string(pos.location) << '\t'
+                << pos.strand << '\t'
+                << pos.convertedCount << '\t'
+                << pos.unconvertedCount << '\n';
+
+
+            }
+
             } else {
                 break;
             }
         }
-        if (index != 0) {
-            refPositions.erase(refPositions.begin(), refPositions.begin()+index);
-        }
+
+            return i;
     }
 
+
+    // void outputFunction(string outputFileName) {
+    //     ostream* out_ = &cout;
+    //     out_ = &cout;
+    //     ofstream tableFile;
+    //     if (!outputFileName.empty()) {
+    //         tableFile.open(outputFileName, ios_base::out );
+    //         out_ = &tableFile;
+    //     }
+
+    //     // *out_ << "ref\tpos\tstrand\tconvertedBaseQualities\tconvertedBaseCount\tunconvertedBaseQualities\tunconvertedBaseCount\n";
+
+    //     *out_ << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
+    //     while (working) {
+
+
+    //         // if (outputPositionPool.popFront(pos)) {
+    //         //     const string& chr = chromosomePos.getChromesomeString(pos->chromosomeId);
+    //         //     *out_ << chr << '\t'
+    //         //               << to_string(pos->location) << '\t'
+    //         //               << pos->strand << '\t'
+    //         //               << pos->convertedCount << '\t'
+    //         //               << pos->unconvertedCount << '\n';
+    //         //     delete pos;
+    //         // } else {
+    //         //     this_thread::sleep_for (std::chrono::microseconds(1));
+    //         // }
+
+    //         if (output){
+    //             int i;
+    //             for (i = 0; i < ToOutRefPositions.size(); i++){
+    //                 Position* pos = ToOutRefPositions[i];
+
+    //                 if (finalOut || pos->location < outLimitPos){
+
+                
+    //                 if (pos->isEmpty() || pos->strand == '?') {
+    //                     delete pos;
+    //                 }
+                    
+    //                 else {
+    //                 const string& chr = chromosomePos.getChromesomeString(pos->chromosomeId);
+    //                 *out_ << chr << '\t'
+    //                     << to_string(pos->location) << '\t'
+    //                     << pos->strand << '\t'
+    //                     << pos->convertedCount << '\t'
+    //                     << pos->unconvertedCount << '\n';
+    //                 delete pos;
+    //                 }
+
+    //                 } else {
+    //                     break;
+    //                 }
+    //             }
+    //                     if (i != 0) {
+    //                     // printf("i: %d\n", i);
+    //                     ToOutRefPositions.erase(ToOutRefPositions.begin(), ToOutRefPositions.begin()+i);
+    //     }
+
+                
+    //             finishOutput();
+    //         }
+    //         else {
+    //             this_thread::sleep_for (std::chrono::microseconds(1));
+    //         }
+    //     }
+    //     tableFile.close();
+    // }
+
     /**
-     * move all the refPosition into output pool.
+     * move the position which position smaller than refCoveredPosition - loadingBlockSize, output it.
      */
-    void moveAllToOutput() {
-        if (refPositions.empty()) {
-            return;
-        }
-        for (int index = 0; index < refPositions.size(); index++) {
-            if (refPositions[index]->isEmpty() || refPositions[index]->strand == '?') {
-                returnPosition(refPositions[index]);
-            } else {
-                outputPositionPool.push(refPositions[index]);
-            }
-        }
-        refPositions.clear();
-    }
+    // void moveBlockToOutput() {
+    //     if (refPositions.empty()) {
+    //         return;
+    //     }
+    //     int index;
+    //     int len = refPositions.size();
+    //     for (index = 0; index < len; index++) {
+    //         if (refPositions[index].location < refCoveredPosition - loadingBlockSize) {
+    //             if (refPositions[index].isEmpty() || refPositions[index].strand == '?') {
+    //                 returnPosition(refPositions[index]);
+    //             } else {
+    //                 outputPositionPool.push(refPositions[index]);
+    //             }
+    //         } else {
+    //             break;
+    //         }
+    //     }
+    //     if (index != 0) {
+    //         // printf("index: %d\n", index);
+    //         refPositions.erase(refPositions.begin(), refPositions.begin()+index);
+
+    //     }
+    // }
+
+    // /**
+    //  * move all the refPosition into output pool.
+    //  */
+    // void moveAllToOutput() {
+    //     if (refPositions.empty()) {
+    //         return;
+    //     }
+    //     for (int index = 0; index < refPositions.size(); index++) {
+    //         if (refPositions[index]->isEmpty() || refPositions[index]->strand == '?') {
+    //             returnPosition(refPositions[index]);
+    //         } else {
+    //             outputPositionPool.push(refPositions[index]);
+    //         }
+    //     }
+    //     refPositions.clear();
+    // }
 
     /**
      * initially load reference sequence for 2 million bp
@@ -423,9 +583,12 @@ public:
         curChromosomeId = chromosomePos.findChromosome(targetChromosome, 0, chromosomePos.pos.size()-1);
         refFile.seekg(startPos, ios::beg);
         refCoveredPosition = 2 * loadingBlockSize;
+
+        refPositions.resize(3*loadingBlockSize);
         string line;
         lastBase = 'X';
         location = 0;
+        int cur = 0;
         while (refFile.good()) {
             getline(refFile, line);
             if (line.front() == '>') { // this line is chromosome name
@@ -433,15 +596,19 @@ public:
             } else {
                 if (line.empty()) { continue; }
                 // change all base to upper case
-                for (int i = 0; i < line.size(); i++) {
-                    line[i] = toupper(line[i]);
-                }
-                appendRefPosition(line);
+
+                // for (int i = 0; i < line.size(); i++) {
+                //     line[i] = toupper(line[i]);
+                // }
+                appendRefPosition(line,cur);
                 if (location >= refCoveredPosition) {
+                    // printf("cur %d\n", cur);
                     return;
                 }
             }
         }
+
+        
     }
 
     /**
@@ -451,19 +618,21 @@ public:
     void loadMore() {
         refCoveredPosition += loadingBlockSize;
         string line;
+        int cur = loadingBlockSize;
         while (refFile.good()) {
             getline(refFile, line);
             if (line.front() == '>') { // meet next chromosome, return.
+                // printf("meet next chromosome\n");
                 return ;
             } else {
                 if (line.empty()) { continue; }
 
-                // change all base to upper case
-                for (int i = 0; i < line.size(); i++) {
-                    line[i] = toupper(line[i]);
-                }
+                // // change all base to upper case
+                // for (int i = 0; i < line.size(); i++) {
+                //     line[i] = toupper(line[i]);
+                // }
 
-                appendRefPosition(line);
+                appendRefPosition(line,cur);
                 if (location >= refCoveredPosition) {
                     return ;
                 }
@@ -483,20 +652,22 @@ public:
         // find the first reference position in pool.
         int index = getIndex(newAlignment.location);
 
+        int len = refPositions.size();
+
         for (int i = 0; i < newAlignment.sequence.size(); i++) {
             PosQuality* b = &newAlignment.bases[i];
             if (b->remove) {
                 continue;
             }
 
-            Position* pos = refPositions[index+b->refPos];
-            assert (pos->location == startPos + b->refPos);
+            Position& pos = refPositions[index+b->refPos];
+            assert (pos.location == startPos + b->refPos);
 
-            if (pos->strand == '?') {
+            if (pos.strand == '?') {
                 // this is for CG-only mode. read has a 'C' or 'G' but not 'CG'.
                 continue;
             }
-            pos->appendBase(newAlignment.bases[i], newAlignment);
+            pos.appendBase(newAlignment.bases[i], newAlignment);
         }
     }
 
@@ -515,16 +686,16 @@ public:
      * get a Position pointer from freePositionPool, if freePositionPool is empty, make a new Position pointer.
      */
     // 一次取一行
-    void getFreePosition(Position*& newPosition) {
-        // while (outputPositionPool.size() >= 10000) {
-        //     this_thread::sleep_for (std::chrono::microseconds(1));
-        // }
-        if (freePositionPool.popFront(newPosition)) {
-            return;
-        } else {
-            newPosition = new Position();
-        }
-    }
+    // void getFreePosition(Position*& newPosition) {
+    //     // while (outputPositionPool.size() >= 10000) {
+    //     //     this_thread::sleep_for (std::chrono::microseconds(1));
+    //     // }
+    //     if (freePositionPool.popFront(newPosition)) {
+    //         return;
+    //     } else {
+    //         newPosition = new Position();
+    //     }
+    // }
 
     /**
      * return the line to freeLinePool
@@ -565,6 +736,13 @@ public:
             appendPositions(newAlignment);
             workerLock[threadID]->unlock();
         }
+    }
+
+    void appendSync(string* line) {
+        tmpAlignment.parse(line);
+        returnLine(line);
+        appendPositions(tmpAlignment);
+
     }
 };
 

@@ -32,7 +32,7 @@ bool uniqueOnly = false;
 bool multipleOnly = false;
 bool CG_only = false;
 int nThreads = 1;
-long long int loadingBlockSize = 100000;
+long long int loadingBlockSize = 60000;
 char convertFrom = '0';
 char convertTo = '0';
 char convertFromComplement;
@@ -243,17 +243,17 @@ bool getSAMChromosomePos(string* line, string& chr, long long int& pos) {
 
 int hisat_3n_table()
 {
-    positions = new Positions(refFileName, nThreads, addedChrName, removedChrName);
+    positions = new Positions(refFileName, nThreads, addedChrName, removedChrName,outputFileName);
 
-    // open #nThreads workers
-    vector<thread*> workers;
-    for (int i = 0; i < nThreads; i++) {
-        workers.push_back(new thread(&Positions::append, positions, i));
-    }
+    // // open #nThreads workers
+    // vector<thread*> workers;
+    // for (int i = 0; i < nThreads; i++) {
+    //     workers.push_back(new thread(&Positions::append, positions, i));
+    // }
 
     // open a output thread
-    thread outputThread;
-    outputThread = thread(&Positions::outputFunction, positions, outputFileName);
+    // thread outputThread;
+    // outputThread = thread(&Positions::outputFunction, positions, outputFileName);
 
     // main function, initially 2 load loadingBlockSize (2,000,000) bp of reference, set reloadPos to 1 loadingBlockSize, then load SAM data.
     // when the samPos larger than the reloadPos load 1 loadingBlockSize bp of reference.
@@ -299,10 +299,24 @@ int hisat_3n_table()
                 this_thread::sleep_for (std::chrono::microseconds(1));
             }
             positions->appendingFinished();
-            positions->moveAllToOutput();
+
+            // printf("start output final\n");
+            // positions->moveAllToOutput();
+
+            positions->startOutput(true);
+
+            // printf("output final finished\n");
+
+            // printf("loading new chromosome: %s\n", samChromosome.c_str());
+
             positions->loadNewChromosome(samChromosome);
+
+            // printf("new chromosome loaded: %s\n", samChromosome.c_str());
+            // printf("positions->refPositions.size(): %d\n", positions->refPositions.size());
+
             reloadPos = loadingBlockSize;
             lastPos = 0;
+            
         }
         // if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
         while (samPos > reloadPos) {
@@ -310,15 +324,25 @@ int hisat_3n_table()
                 this_thread::sleep_for (std::chrono::microseconds(1));
             }
             positions->appendingFinished();
-            positions->moveBlockToOutput();
+
+            // printf("start output\n");
+            // printf("positions->refPositions.size(): %d\n", positions->refPositions.size());
+            positions->startOutput();
+            // printf("output finished\n");
+            // printf("positions->refPositions.size(): %d\n", positions->refPositions.size());
+            // positions->moveBlockToOutput();
             positions->loadMore();
+            // printf("load more finished\n");   
+            // printf("positions->refPositions.size(): %d\n", positions->refPositions.size());
             reloadPos += loadingBlockSize;
         }
         if (lastPos > samPos) {
             cerr << "The input alignment file is not sorted. Please use sorted SAM file as alignment file." << endl;
             throw 1;
         }
-        positions->linePool.push(line);
+        // printf("pushed a line\n!");
+        // positions->linePool.push(line);
+        positions->appendSync(line);
         lastPos = samPos;
     }
     //}
@@ -336,18 +360,18 @@ int hisat_3n_table()
     // make sure all workers finished their appending work.
     positions->appendingFinished();
     // move all position to outputPool
-    positions->moveAllToOutput();
+    positions->startOutput(true);
     // wait until outputPool is empty
     while (!positions->outputPositionPool.empty()) {
         this_thread::sleep_for (std::chrono::microseconds(100));
     }
     // stop all thread and clean
-    positions->working = false;
-    for (int i = 0; i < nThreads; i++){
-        workers[i]->join();
-        delete workers[i];
-    }
-    outputThread.join();
+    // positions->working = false;
+    // for (int i = 0; i < nThreads; i++){
+    //     workers[i]->join();
+    //     delete workers[i];
+    // }
+    // outputThread.join();
     delete positions;
     return 0;
 }
