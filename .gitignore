@@ -46,3 +46,4 @@ docs/.*-cache
 *.pyc
 
 hisat-3n-table
+hisat-3n-table-d
