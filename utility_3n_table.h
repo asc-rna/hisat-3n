@@ -23,6 +23,10 @@
 #include <mutex>
 #include <queue>
 #include <algorithm>
+#include <ostream>
+#include <sstream>
+#include <thread>
+#include <functional>
 
 using namespace std;
 
@@ -377,4 +381,103 @@ public:
         std::sort(pos.begin(), pos.end());
     }
 };
+
+// buffered, shared output
+struct BufferedOutput
+{
+protected:
+	ostream &output;
+	size_t cnt;
+	size_t capacity;
+	stringstream buffer;
+
+	void flush() {
+		static mutex output_lock;
+		lock_guard<mutex> _(output_lock);
+
+		output << buffer.rdbuf();
+		buffer.str(""); // clear buffer
+	}
+
+public:
+	BufferedOutput(ostream &output, size_t capacity):
+		output(output), cnt(0), capacity(capacity) 
+	{}
+
+	template <class T>
+	BufferedOutput &operator<<(T &&data)
+	{
+		buffer << std::forward<T>(data);
+		if (cnt++ == capacity)
+			flush();
+		return *this;
+	}
+
+	~BufferedOutput()
+	{
+		flush();
+	}
+};
+
+template <class T>
+struct SPSCWorker
+{
+protected:
+	queue<T> que;
+	mutex que_lock;
+	function<void(T)> consumer_func;
+	bool consumer_working;
+	thread consumer_thread;
+
+	void consumer()
+	{
+		while (true)
+		{
+			que_lock.lock();
+			if (que.empty()) 
+			{
+				if (consumer_working)
+				{
+					que_lock.unlock();
+					this_thread::sleep_for (chrono::microseconds(1));
+					// this_thread::yield();
+				}
+				else
+				{
+					que_lock.unlock();
+					return;
+				}
+			}
+			else
+			{
+				auto data = std::move(que.front());
+				que.pop();
+				que_lock.unlock();
+				consumer_func(std::move(data));
+			}
+		}
+	}
+
+public:
+	template <class F>
+	SPSCWorker(F &&f) :
+		consumer_func(std::forward<F>(f)),
+		consumer_working(true),
+		consumer_thread(&SPSCWorker<T>::consumer, this)
+	{}
+
+	void join()
+	{
+		consumer_working = false;
+		consumer_thread.join();
+	}
+
+	template <class P>
+	void push(P &&data)
+	{
+		lock_guard<mutex> _(que_lock);
+		que.emplace(std::forward<P>(data));
+	}
+};
+
 #endif //UTILITY_3N_TABLE_H

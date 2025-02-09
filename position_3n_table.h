@@ -206,32 +206,23 @@ public:
     char lastBase = 'X'; // the last base of reference line. this is for CG_only mode.
     SafeQueue<string*> freeLinePool; // pool to store free string pointer for SAM line.
     UnsafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
-    bool working;
-    mutex mutex_;
     long long int refCoveredPosition; // this is the last position in reference chromosome we loaded in refPositions.
     ifstream refFile;
-    vector<mutex*> workerLock; // one lock for one worker thread.
-    int nThreads = 1;
     ChromosomeFilePositions chromosomePos; // store the chromosome name and it's streamPos. To quickly find new chromosome in file.
     bool addedChrName = false;
     bool removedChrName = false;
+		
+		BufferedOutput out;
 
-    Positions(string inputRefFileName, int inputNThreads, bool inputAddedChrName, bool inputRemovedChrName) {
-        working = true;
-        nThreads = inputNThreads;
+    Positions(string inputRefFileName, bool inputAddedChrName, bool inputRemovedChrName)
+			: out(cout, 10000) {
         addedChrName = inputAddedChrName;
         removedChrName = inputRemovedChrName;
-        for (int i = 0; i < nThreads; i++) {
-            workerLock.push_back(new mutex);
-        }
         refFile.open(inputRefFileName, ios_base::in);
         LoadChromosomeNamesPos();
     }
 
     ~Positions() {
-        for (int i = 0; i < workerLock.size(); i++) {
-            delete workerLock[i];
-        }
         Position* pos;
         while(freePositionPool.popFront(pos)) {
             delete pos;
@@ -327,24 +318,14 @@ public:
         location += len;
     }
 
-    /**
-     * if we can go through all the workerLock, that means no worker is appending new position.
-     */
-    void appendingFinished() {
-        for (int i = 0; i < nThreads; i++) {
-            workerLock[i]->lock();
-            workerLock[i]->unlock();
-        }
-    }
-
 		void output_pos(const Position *pos)
 		{
 				if (!pos->isEmpty() && pos->strand != '?') {
-						cout << chromosomePos.getChromesomeString(pos->chromosomeId) << '\t'
-								 << pos->location << '\t'
-								 << pos->strand << '\t' 
-								 << pos->convertedCount << '\t' 
-								 << pos->unconvertedCount << '\n';
+						out << chromosomePos.getChromesomeString(pos->chromosomeId) << '\t'
+							  << pos->location << '\t'
+							  << pos->strand << '\t' 
+							  << pos->convertedCount << '\t' 
+								<< pos->unconvertedCount << '\n';
 				}
 		}
 

@@ -20,6 +20,8 @@
 
 #include <iostream>
 #include <getopt.h>
+#include <list>
+#include <map>
 #include "position_3n_table.h"
 
 using namespace std;
@@ -41,7 +43,6 @@ bool addedChrName = false;
 bool removedChrName = false;
 
 
-Positions* positions;
 
 bool fileExist (string& filename) {
     ifstream file(filename);
@@ -208,16 +209,16 @@ static void parseOptions(int argc, const char **argv) {
  * give a SAM line, extract the chromosome and position information.
  * return true if the SAM line is mapped. return false if SAM line is not maped.
  */
-bool getSAMChromosomePos(string* line, string& chr, long long int& pos) {
+bool getSAMChromosomePos(const string &line, string& chr, long long int& pos) {
     int startPosition = 0;
     int endPosition = 0;
     int count = 0;
 
-    while ((endPosition = line->find("\t", startPosition)) != string::npos) {
+    while ((endPosition = line.find("\t", startPosition)) != string::npos) {
         if (count == 2) {
-            chr = line->substr(startPosition, endPosition - startPosition);
+            chr = line.substr(startPosition, endPosition - startPosition);
         } else if (count == 3) {
-            pos = stoll(line->substr(startPosition, endPosition - startPosition));
+            pos = stoll(line.substr(startPosition, endPosition - startPosition));
             if (chr == "*") {
                 return false;
             } else {
@@ -240,12 +241,72 @@ bool getSAMChromosomePos(string* line, string& chr, long long int& pos) {
     }
 }*/
 
+struct Worker : public SPSCWorker<string>
+{
+	Positions *positions = nullptr;
+	Alignment newAlignment;
+	long long int reloadPos; // the position in reference that we need to reload.
+	long long int lastPos = 0; // the position on last SAM line. compare lastPos with samPos to make sure the SAM is sorted.
+	size_t load = 0;
+
+	Worker() : 
+		SPSCWorker<string>([this](string line) {
+			if (positions == nullptr) {
+				positions = new Positions(refFileName, addedChrName, removedChrName);
+			}
+
+			string samChromosome; // the chromosome name of current SAM line.
+			long long int samPos; // the position of current SAM line.
+			getSAMChromosomePos(line, samChromosome, samPos);
+
+			// if the samChromosome is different than current positions' chromosome, finish all SAM line.
+			// then load a new reference chromosome.
+			if (samChromosome != positions->chromosome) {
+				positions->moveAllToOutput();
+				positions->loadNewChromosome(samChromosome);
+				reloadPos = loadingBlockSize;
+				lastPos = 0;
+			}
+			// if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
+			while (samPos > reloadPos) {
+				positions->moveBlockToOutput();
+				positions->loadMore();
+				reloadPos += loadingBlockSize;
+			}
+
+			// work on this line
+			newAlignment.parse(&line);
+			positions->appendPositions(newAlignment);
+			lastPos = samPos;
+		})
+	{}
+
+	~Worker() 
+	{
+		join();
+    positions->moveAllToOutput();
+		delete positions;
+	}
+
+	template <class P>
+	void push(P &&data)
+	{
+		load++;
+		SPSCWorker<string>::push(std::forward<P>(data));
+	}
+};
+
 int hisat_3n_table()
 {
-    positions = new Positions(refFileName, nThreads, addedChrName, removedChrName);
-		Alignment newAlignment;
-
 		cout << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
+
+		list<Worker> workers(nThreads);
+		auto find_worker = [&workers]() {
+			return &*min_element(workers.begin(), workers.end(), [](const Worker& lhs, const Worker &rhs) {
+				return lhs.load < rhs.load;
+			});
+		};
+		map<string, Worker *> assigned_worker;
 
     // main function, initially 2 load loadingBlockSize (2,000,000) bp of reference, set reloadPos to 1 loadingBlockSize, then load SAM data.
     // when the samPos larger than the reloadPos load 1 loadingBlockSize bp of reference.
@@ -257,66 +318,37 @@ int hisat_3n_table()
         alignmentFile = &inputFile;
     }
 
-    string* line; // temporary string to get SAM line.
-    string samChromosome; // the chromosome name of current SAM line.
-    long long int samPos; // the position of current SAM line.
-    long long int reloadPos; // the position in reference that we need to reload.
-    long long int lastPos = 0; // the position on last SAM line. compare lastPos with samPos to make sure the SAM is sorted.
-
     while (alignmentFile->good()) {
-        positions->getFreeStringPointer(line);
-        if (!getline(*alignmentFile, *line)) {
-            positions->returnLine(line);
+				string line; 
+        if (!getline(*alignmentFile, line)) {
             break;
         }
-
-        if (line->empty() || line->front() == '@') {
-            positions->returnLine(line);
+        if (line.empty() || line.front() == '@') {
             continue;
         }
+
+				string samChromosome; // the chromosome name of current SAM line.
+				long long int samPos; // the position of current SAM line.
         // if the SAM line is empty or unmapped, get the next SAM line.
         if (!getSAMChromosomePos(line, samChromosome, samPos)) {
-            positions->returnLine(line);
             continue;
         }
-        // if the samChromosome is different than current positions' chromosome, finish all SAM line.
-        // then load a new reference chromosome.
-        if (samChromosome != positions->chromosome) {
-            positions->appendingFinished();
-            positions->moveAllToOutput();
-            positions->loadNewChromosome(samChromosome);
-            reloadPos = loadingBlockSize;
-            lastPos = 0;
-        }
-        // if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
-        while (samPos > reloadPos) {
-            positions->appendingFinished();
-            positions->moveBlockToOutput();
-            positions->loadMore();
-            reloadPos += loadingBlockSize;
-        }
-        if (lastPos > samPos) {
-            cerr << "The input alignment file is not sorted. Please use sorted SAM file as alignment file." << endl;
-            throw 1;
-        }
-				{ // work on this line
-					newAlignment.parse(line);
-					positions->appendPositions(newAlignment);
-					positions->returnLine(line);
+
+				auto it = assigned_worker.find(samChromosome);
+				if (it != assigned_worker.end()) {
+					it->second->push(std::move(line));
 				}
-        lastPos = samPos;
+				else {
+					auto worker = find_worker();
+					cerr << "assign chromosome " << samChromosome << " to" << worker << endl;
+					assigned_worker[samChromosome] = worker;
+					worker->push(std::move(line));
+				}
     }
-    //}
+
     if (!standardInMode) {
         inputFile.close();
     }
-
-    // move all position to outputPool
-    positions->moveAllToOutput();
-    // stop all thread and clean
-    positions->working = false;
-
-    delete positions;
     return 0;
 }
 
