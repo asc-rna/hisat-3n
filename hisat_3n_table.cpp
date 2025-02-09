@@ -240,20 +240,12 @@ bool getSAMChromosomePos(string* line, string& chr, long long int& pos) {
     }
 }*/
 
-
 int hisat_3n_table()
 {
     positions = new Positions(refFileName, nThreads, addedChrName, removedChrName);
+		Alignment newAlignment;
 
-    // open #nThreads workers
-    vector<thread*> workers;
-    for (int i = 0; i < nThreads; i++) {
-        workers.push_back(new thread(&Positions::append, positions, i));
-    }
-
-    // open a output thread
-    thread outputThread;
-    outputThread = thread(&Positions::outputFunction, positions, outputFileName);
+		cout << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
 
     // main function, initially 2 load loadingBlockSize (2,000,000) bp of reference, set reloadPos to 1 loadingBlockSize, then load SAM data.
     // when the samPos larger than the reloadPos load 1 loadingBlockSize bp of reference.
@@ -282,10 +274,6 @@ int hisat_3n_table()
             positions->returnLine(line);
             continue;
         }
-        // limit the linePool size to save memory
-        while(positions->linePool.size() > 1000 * nThreads) {
-            this_thread::sleep_for (std::chrono::microseconds(1));
-        }
         // if the SAM line is empty or unmapped, get the next SAM line.
         if (!getSAMChromosomePos(line, samChromosome, samPos)) {
             positions->returnLine(line);
@@ -294,10 +282,6 @@ int hisat_3n_table()
         // if the samChromosome is different than current positions' chromosome, finish all SAM line.
         // then load a new reference chromosome.
         if (samChromosome != positions->chromosome) {
-            // wait all line is processed
-            while (!positions->linePool.empty() || positions->outputPositionPool.size() > 100000) {
-                this_thread::sleep_for (std::chrono::microseconds(1));
-            }
             positions->appendingFinished();
             positions->moveAllToOutput();
             positions->loadNewChromosome(samChromosome);
@@ -306,9 +290,6 @@ int hisat_3n_table()
         }
         // if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
         while (samPos > reloadPos) {
-            while (!positions->linePool.empty() || positions->outputPositionPool.size() > 100000) {
-                this_thread::sleep_for (std::chrono::microseconds(1));
-            }
             positions->appendingFinished();
             positions->moveBlockToOutput();
             positions->loadMore();
@@ -318,7 +299,11 @@ int hisat_3n_table()
             cerr << "The input alignment file is not sorted. Please use sorted SAM file as alignment file." << endl;
             throw 1;
         }
-        positions->linePool.push(line);
+				{ // work on this line
+					newAlignment.parse(line);
+					positions->appendPositions(newAlignment);
+					positions->returnLine(line);
+				}
         lastPos = samPos;
     }
     //}
@@ -326,28 +311,11 @@ int hisat_3n_table()
         inputFile.close();
     }
 
-
-    // prepare to close everything.
-
-    // make sure linePool is empty
-    while (!positions->linePool.empty()) {
-        this_thread::sleep_for (std::chrono::microseconds(100));
-    }
-    // make sure all workers finished their appending work.
-    positions->appendingFinished();
     // move all position to outputPool
     positions->moveAllToOutput();
-    // wait until outputPool is empty
-    while (!positions->outputPositionPool.empty()) {
-        this_thread::sleep_for (std::chrono::microseconds(100));
-    }
     // stop all thread and clean
     positions->working = false;
-    for (int i = 0; i < nThreads; i++){
-        workers[i]->join();
-        delete workers[i];
-    }
-    outputThread.join();
+
     delete positions;
     return 0;
 }

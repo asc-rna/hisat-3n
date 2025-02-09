@@ -92,7 +92,7 @@ public:
     /**
      * return true if there is mapping information in this reference position.
      */
-    inline bool isEmpty() {
+    bool isEmpty() const {
         // return convertedQualities.empty() && unconvertedQualities.empty();
         return empty;
     }
@@ -191,6 +191,7 @@ public:
         
         // mutex_.unlock();
     }
+
 };
 
 /**
@@ -203,10 +204,8 @@ public:
     int curChromosomeId;
     long long int location; // current location (position) in reference chromosome.
     char lastBase = 'X'; // the last base of reference line. this is for CG_only mode.
-    SafeQueue<string*> linePool; // pool to store unprocessed SAM line.
     SafeQueue<string*> freeLinePool; // pool to store free string pointer for SAM line.
     UnsafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
-    SafeQueue<Position*> outputPositionPool; // pool to store the reference position which is loaded and ready to output.
     bool working;
     mutex mutex_;
     long long int refCoveredPosition; // this is the last position in reference chromosome we loaded in refPositions.
@@ -338,37 +337,16 @@ public:
         }
     }
 
-    /**
-     * the output function for output thread.
-     */
-    void outputFunction(string outputFileName) {
-        ostream* out_ = &cout;
-        out_ = &cout;
-        ofstream tableFile;
-        if (!outputFileName.empty()) {
-            tableFile.open(outputFileName, ios_base::out);
-            out_ = &tableFile;
-        }
-
-        // *out_ << "ref\tpos\tstrand\tconvertedBaseQualities\tconvertedBaseCount\tunconvertedBaseQualities\tunconvertedBaseCount\n";
-
-        *out_ << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
-        Position* pos;
-        while (working) {
-            if (outputPositionPool.popFront(pos)) {
-                const string& chr = chromosomePos.getChromesomeString(pos->chromosomeId);
-                *out_ << chr << '\t'
-                          << to_string(pos->location) << '\t'
-                          << pos->strand << '\t'
-                          << pos->convertedCount << '\t'
-                          << pos->unconvertedCount << '\n';
-                delete pos;
-            } else {
-                this_thread::sleep_for (std::chrono::microseconds(1));
-            }
-        }
-        tableFile.close();
-    }
+		void output_pos(const Position *pos)
+		{
+				if (!pos->isEmpty() && pos->strand != '?') {
+						cout << chromosomePos.getChromesomeString(pos->chromosomeId) << '\t'
+								 << pos->location << '\t'
+								 << pos->strand << '\t' 
+								 << pos->convertedCount << '\t' 
+								 << pos->unconvertedCount << '\n';
+				}
+		}
 
     /**
      * move the position which position smaller than refCoveredPosition - loadingBlockSize, output it.
@@ -381,11 +359,8 @@ public:
         int len = refPositions.size();
         for (index = 0; index < len; index++) {
             if (refPositions[index]->location < refCoveredPosition - loadingBlockSize) {
-                if (refPositions[index]->isEmpty() || refPositions[index]->strand == '?') {
-                    returnPosition(refPositions[index]);
-                } else {
-                    outputPositionPool.push(refPositions[index]);
-                }
+								output_pos(refPositions[index]);
+								returnPosition(refPositions[index]);
             } else {
                 break;
             }
@@ -403,11 +378,8 @@ public:
             return;
         }
         for (int index = 0; index < refPositions.size(); index++) {
-            if (refPositions[index]->isEmpty() || refPositions[index]->strand == '?') {
-                returnPosition(refPositions[index]);
-            } else {
-                outputPositionPool.push(refPositions[index]);
-            }
+						output_pos(refPositions[index]);
+						returnPosition(refPositions[index]);
         }
         refPositions.clear();
     }
@@ -516,9 +488,6 @@ public:
      */
     // 一次取一行
     void getFreePosition(Position*& newPosition) {
-        // while (outputPositionPool.size() >= 10000) {
-        //     this_thread::sleep_for (std::chrono::microseconds(1));
-        // }
         if (freePositionPool.popFront(newPosition)) {
             return;
         } else {
@@ -540,31 +509,6 @@ public:
     void returnPosition(Position* pos) {
         pos->initialize();
         freePositionPool.push(pos);
-    }
-
-    /**
-     * this is the working function.
-     * it take the SAM line from linePool, parse it.
-     */
-    void append(int threadID) {
-        string* line;
-        Alignment newAlignment;
-
-        while (working) {
-            workerLock[threadID]->lock();
-            if(!linePool.popFront(line)) {
-                workerLock[threadID]->unlock();
-                this_thread::sleep_for (std::chrono::nanoseconds(1));
-                continue;
-            }
-            while (refPositions.empty()) {
-                this_thread::sleep_for (std::chrono::microseconds(1));
-            }
-            newAlignment.parse(line);
-            returnLine(line);
-            appendPositions(newAlignment);
-            workerLock[threadID]->unlock();
-        }
     }
 };
 
