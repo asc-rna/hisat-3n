@@ -24,9 +24,13 @@
 #include <vector>
 #include <fstream>
 #include <mutex>
+#include <shared_mutex>
+
 #include <thread>
 #include <cassert>
 #include "alignment_3n_table.h"
+
+
 
 using namespace std;
 
@@ -62,13 +66,15 @@ class Position{
     // mutex mutex_;
 public:
     // string chromosome; // reference chromosome name
-    short chromosomeId;
     long long int location; // 1-based position
+    short chromosomeId;
+    unsigned short convertedCount = 0;
+    unsigned short unconvertedCount = 0;
+    
     char strand; // +(REF) or -(REF-RC)
     // string convertedQualities; // each char is a mapping quality on this position for converted base.
     // string unconvertedQualities; // each char is a mapping quality on this position for unconverted base.
-    unsigned short convertedCount = 0;
-    unsigned short unconvertedCount = 0;
+
     bool empty = true;
     // vector<uniqueID> uniqueIDs; // each value represent a readName which contributed the base information.
     //                           // readNameIDs is to make sure no read contribute 2 times in same position.
@@ -213,6 +219,7 @@ public:
     SafeQueue<Position*> outputPositionPool; // pool to store the reference position which is loaded and ready to output.
     bool working;
     mutex mutex_;
+    mutable shared_mutex s_mutex;
     long long int refCoveredPosition; // this is the last position in reference chromosome we loaded in refPositions.
     ifstream refFile;
     vector<mutex*> workerLock; // one lock for one worker thread.
@@ -273,8 +280,10 @@ public:
         }
 
 
+        // 写锁保护
+        {
 
-        
+        std::lock_guard<std::shared_mutex> lock(s_mutex);
         if (!ToOutRefPositions.empty()) {
 
         for (Position& pos:ToOutRefPositions){
@@ -308,6 +317,9 @@ public:
             std::swap(refPositions, ToOutRefPositions);
             refPositions.clear();
         }
+
+        }
+
         long outLimitPos = refCoveredPosition - loadingBlockSize;
 
 
@@ -720,8 +732,11 @@ public:
     void append(int threadID) {
         string* line;
         Alignment newAlignment;
+       
 
         while (working) {
+             // 读锁保护
+            std::shared_lock<std::shared_mutex> lock(s_mutex);
             workerLock[threadID]->lock();
             if(!linePool.popFront(line)) {
                 workerLock[threadID]->unlock();

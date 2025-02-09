@@ -246,10 +246,10 @@ int hisat_3n_table()
     positions = new Positions(refFileName, nThreads, addedChrName, removedChrName,outputFileName);
 
     // // open #nThreads workers
-    // vector<thread*> workers;
-    // for (int i = 0; i < nThreads; i++) {
-    //     workers.push_back(new thread(&Positions::append, positions, i));
-    // }
+    vector<thread*> workers;
+    for (int i = 0; i < nThreads; i++) {
+        workers.push_back(new thread(&Positions::append, positions, i));
+    }
 
     // open a output thread
     // thread outputThread;
@@ -341,8 +341,8 @@ int hisat_3n_table()
             throw 1;
         }
         // printf("pushed a line\n!");
-        // positions->linePool.push(line);
-        positions->appendSync(line);
+        positions->linePool.push(line);
+        // positions->appendSync(line);
         lastPos = samPos;
     }
     //}
@@ -366,11 +366,11 @@ int hisat_3n_table()
         this_thread::sleep_for (std::chrono::microseconds(100));
     }
     // stop all thread and clean
-    // positions->working = false;
-    // for (int i = 0; i < nThreads; i++){
-    //     workers[i]->join();
-    //     delete workers[i];
-    // }
+    positions->working = false;
+    for (int i = 0; i < nThreads; i++){
+        workers[i]->join();
+        delete workers[i];
+    }
     // outputThread.join();
     delete positions;
     return 0;
