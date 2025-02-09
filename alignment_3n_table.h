@@ -107,7 +107,13 @@ public:
         int endPosition = 0;
         int count = 0;
 
-        while ((endPosition = line->find("\t", startPosition)) != string::npos) {
+        while (true) {
+
+            endPosition = line->find("\t", startPosition);
+            if (endPosition == string::npos) {
+                endPosition = line->size();
+            }
+
             if (count == 0) {
                 string readName = line->substr(startPosition, endPosition - startPosition);
                 getNameHash(readName);
@@ -143,16 +149,14 @@ public:
                     strand = line->at(endPosition-1);
                 }
             }
+
+            if (endPosition == line->size()) {
+                break;
+            }
             startPosition = endPosition + 1;
             count++;
         }
-        if (startWith(line, startPosition, "MD")) {
-            MD.loadString(line->substr(startPosition + 5, endPosition - startPosition - 5));
-        } else if (startWith(line, startPosition, "NM")) {
-            NH = stoi(line->substr(startPosition + 5, endPosition - startPosition - 5));
-        } else if (startWith(line, startPosition, "YZ")) {
-            strand = line->at(endPosition-1);
-        }
+
      }
 
      /**
