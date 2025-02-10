@@ -34,7 +34,7 @@ bool uniqueOnly = false;
 bool multipleOnly = false;
 bool CG_only = false;
 int nThreads = 1;
-long long int loadingBlockSize = 100000;
+long long int loadingBlockSize = 12000;
 char convertFrom = '0';
 char convertTo = '0';
 char convertFromComplement;
@@ -241,7 +241,7 @@ bool getSAMChromosomePos(const string &line, string& chr, long long int& pos) {
     }
 }*/
 
-struct Worker : public SPSCWorker<string>
+struct Worker : public SPSCWorker<vector<string>>
 {
 	Positions *positions = nullptr;
 	Alignment newAlignment;
@@ -249,40 +249,53 @@ struct Worker : public SPSCWorker<string>
 	long long int lastPos = 0; // the position on last SAM line. compare lastPos with samPos to make sure the SAM is sorted.
 	size_t load = 0;
 
+	vector<string> buffer;
+
 	Worker() : 
-		SPSCWorker<string>([this](string line) {
+		SPSCWorker<vector<string>>([this](vector<string> lines) {
 			if (positions == nullptr) {
 				positions = new Positions(refFileName, addedChrName, removedChrName);
 			}
 
-			string samChromosome; // the chromosome name of current SAM line.
-			long long int samPos; // the position of current SAM line.
-			getSAMChromosomePos(line, samChromosome, samPos);
+			for (auto &&line: lines)
+			{
+				string samChromosome; // the chromosome name of current SAM line.
+				long long int samPos; // the position of current SAM line.
+				getSAMChromosomePos(line, samChromosome, samPos);
 
-			// if the samChromosome is different than current positions' chromosome, finish all SAM line.
-			// then load a new reference chromosome.
-			if (samChromosome != positions->chromosome) {
-				positions->moveAllToOutput();
-				positions->loadNewChromosome(samChromosome);
-				reloadPos = loadingBlockSize;
-				lastPos = 0;
-			}
-			// if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
-			while (samPos > reloadPos) {
-				positions->moveBlockToOutput();
-				positions->loadMore();
-				reloadPos += loadingBlockSize;
-			}
+				// if the samChromosome is different than current positions' chromosome, finish all SAM line.
+				// then load a new reference chromosome.
+				if (samChromosome != positions->chromosome) {
+					positions->moveAllToOutput();
+					positions->loadNewChromosome(samChromosome);
+					reloadPos = loadingBlockSize;
+					lastPos = 0;
+				}
+				// if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
+				while (samPos > reloadPos) {
+					positions->moveBlockToOutput();
+					positions->loadMore();
+					reloadPos += loadingBlockSize;
+				}
 
-			// work on this line
-			newAlignment.parse(&line);
-			positions->appendPositions(newAlignment);
-			lastPos = samPos;
+				// work on this line
+				newAlignment.parse(&line);
+				positions->appendPositions(newAlignment);
+				lastPos = samPos;
+			}
 		})
 	{}
 
+	void flush()
+	{
+		vector<string> ve;
+		swap(buffer, ve);
+		SPSCWorker<vector<string>>::push(std::move(ve));
+	}
+
 	~Worker() 
 	{
+		flush();
 		join();
     positions->moveAllToOutput();
 		delete positions;
@@ -292,7 +305,9 @@ struct Worker : public SPSCWorker<string>
 	void push(P &&data)
 	{
 		load++;
-		SPSCWorker<string>::push(std::forward<P>(data));
+		buffer.emplace_back(std::forward<P>(data));
+		if (buffer.size() > 10000)
+			flush();
 	}
 };
 

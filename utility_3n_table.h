@@ -440,7 +440,6 @@ protected:
 				{
 					que_lock.unlock();
 					this_thread::sleep_for (chrono::microseconds(1));
-					// this_thread::yield();
 				}
 				else
 				{
