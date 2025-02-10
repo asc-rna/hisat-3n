@@ -385,7 +385,8 @@ public:
 // buffered, shared output
 struct BufferedOutput
 {
-protected:
+// make gcc-12 happy
+// protected:
 	ostream &output;
 	size_t cnt;
 	size_t capacity;
@@ -393,31 +394,49 @@ protected:
 
 	void flush() {
 		static mutex output_lock;
-		lock_guard<mutex> _(output_lock);
-
-		output << buffer.rdbuf();
+		{
+			lock_guard<mutex> _(output_lock);
+			output << buffer.rdbuf();
+		}
 		buffer.str(""); // clear buffer
+		cnt = 0;
 	}
 
 public:
+	struct BufferedOutputLock
+	{
+		BufferedOutput *output;
+
+		~BufferedOutputLock()
+		{
+			if (output->cnt >= output->capacity)
+				output->flush();
+		}
+
+		template <class T>
+		friend BufferedOutputLock &&operator<<(BufferedOutputLock &&self, T &&data)
+		{
+			self.output->buffer << std::forward<T>(data);
+			self.output->cnt++;
+			return std::move(self);
+		}
+	};
+
 	BufferedOutput(ostream &output, size_t capacity):
 		output(output), cnt(0), capacity(capacity) 
 	{}
-
-	template <class T>
-	BufferedOutput &operator<<(T &&data)
-	{
-		buffer << std::forward<T>(data);
-		if (cnt++ == capacity)
-			flush();
-		return *this;
-	}
 
 	~BufferedOutput()
 	{
 		flush();
 	}
+
+	BufferedOutputLock lock()
+	{
+		return {this};
+	}
 };
+
 
 template <class T>
 struct SPSCWorker
