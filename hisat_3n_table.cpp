@@ -252,11 +252,9 @@ struct Worker : public SPSCWorker<vector<string>>
 	vector<string> buffer;
 
 	Worker() : 
-		SPSCWorker<vector<string>>([this](vector<string> lines) {
-			if (positions == nullptr) {
-				positions = new Positions(refFileName, addedChrName, removedChrName);
-			}
-
+		SPSCWorker<vector<string>>([this] {
+			positions = new Positions(refFileName, addedChrName, removedChrName);
+		}, [this](vector<string> lines) {
 			for (auto &&line: lines)
 			{
 				string samChromosome; // the chromosome name of current SAM line.
@@ -306,7 +304,7 @@ struct Worker : public SPSCWorker<vector<string>>
 	{
 		load++;
 		buffer.emplace_back(std::forward<P>(data));
-		if (buffer.size() > 10000)
+		if (buffer.size() > 100000)
 			flush();
 	}
 };
@@ -326,18 +324,14 @@ int hisat_3n_table()
     // main function, initially 2 load loadingBlockSize (2,000,000) bp of reference, set reloadPos to 1 loadingBlockSize, then load SAM data.
     // when the samPos larger than the reloadPos load 1 loadingBlockSize bp of reference.
     // when the samChromosome is different to current chromosome, finish all sam position and output all.
-    ifstream inputFile;
-    istream *alignmentFile = &cin;
-    if (!standardInMode) {
-        inputFile.open(alignmentFileName, ios_base::in);
-        alignmentFile = &inputFile;
-    }
 
-    while (alignmentFile->good()) {
-				string line; 
-        if (!getline(*alignmentFile, line)) {
-            break;
-        }
+		static char buff[1000000];
+
+    while (true) {
+				if (fgets(buff, sizeof(buff), stdin) == NULL)
+					break;
+
+				string line(buff); 
         if (line.empty() || line.front() == '@') {
             continue;
         }
@@ -361,9 +355,6 @@ int hisat_3n_table()
 				}
     }
 
-    if (!standardInMode) {
-        inputFile.close();
-    }
     return 0;
 }
 

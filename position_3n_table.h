@@ -321,11 +321,11 @@ public:
 		void output_pos(const Position *pos)
 		{
 				if (!pos->isEmpty() && pos->strand != '?') {
-						out << chromosomePos.getChromesomeString(pos->chromosomeId) << '\t'
-							  << pos->location << '\t'
-							  << pos->strand << '\t' 
-							  << pos->convertedCount << '\t' 
-								<< pos->unconvertedCount << '\n';
+						out.lock() << chromosomePos.getChromesomeString(pos->chromosomeId) << '\t'
+											 << pos->location << '\t'
+											 << pos->strand << '\t' 
+											 << pos->convertedCount << '\t' 
+											 << pos->unconvertedCount << '\n';
 				}
 		}
 

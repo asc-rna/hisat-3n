@@ -425,12 +425,14 @@ struct SPSCWorker
 protected:
 	queue<T> que;
 	mutex que_lock;
+	function<void()> initial_func;
 	function<void(T)> consumer_func;
 	bool consumer_working;
 	thread consumer_thread;
 
 	void consumer()
 	{
+		initial_func();
 		while (true)
 		{
 			que_lock.lock();
@@ -458,9 +460,10 @@ protected:
 	}
 
 public:
-	template <class F>
-	SPSCWorker(F &&f) :
-		consumer_func(std::forward<F>(f)),
+	template <class Fi, class Fc>
+	SPSCWorker(Fi &&fi, Fc &&fc) :
+		initial_func(std::forward<Fi>(fi)),
+		consumer_func(std::forward<Fc>(fc)),
 		consumer_working(true),
 		consumer_thread(&SPSCWorker<T>::consumer, this)
 	{}
