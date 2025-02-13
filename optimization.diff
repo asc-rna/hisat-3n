@@ -1,0 +1,1006 @@
+# 以下是一份 git diff 文件，包含了对 hisat-3n-table 这个应用的代码进行的优化。
+# 以 - 开头表示删除，以 + 开头表示增加，以 # 开头的部分简略地解释了这一修改的原因和目的。
+# 请为我们的修改写一份正式地、详细地文档，请使用英文。
+
+commit 7b967db90504353281493e5b12a37acbfa6cda58
+Author: Yang Zhang <yangzhan23@mails.tsinghua.edu.cn>
+Date:   Thu Feb 6 13:34:22 2025 +0800
+
+    perf: -p1 modify Positionpool cache and contention
+    
+    删除positons中不必要的数据结构，case1 2min30s，待测试正确性。认为下一步可以考虑化成单线程，现在的瓶颈可能在三个线程反而用不好各自的cache，类似于false-sharing。
+    
+    upd(hisat-3n-table): change to single thread
+    
+    feat(table): 根据染色体分类并行
+    
+    perf(table): add buffer for task queue
+    
+    perf(table): getline -> fgets
+    
+    fix(table): fix buffered output
+    
+    fix(table): merge scy's fix to parse
+    
+    remove useless code
+
+diff --git a/.gitignore b/.gitignore
+index 45f5cca..56501a1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -44,3 +44,5 @@ docs/.*-cache
+ *.tar.gz
+ *.ipynb
+ *.pyc
++
++hisat-3n-table
+diff --git a/alignment_3n_table.h b/alignment_3n_table.h
+index 83715a7..77f2357 100644
+--- a/alignment_3n_table.h
++++ b/alignment_3n_table.h
+@@ -107,7 +107,13 @@ public:
+         int endPosition = 0;
+         int count = 0;
+ 
+-        while ((endPosition = line->find("\t", startPosition)) != string::npos) {
++        while (true) {
++
++            endPosition = line->find("\t", startPosition);
++            if (endPosition == string::npos) {
++                endPosition = line->size();
++            }
++            
+             if (count == 0) {
+                 string readName = line->substr(startPosition, endPosition - startPosition);
+                 getNameHash(readName);
+@@ -145,13 +151,9 @@ public:
+             }
+             startPosition = endPosition + 1;
+             count++;
+-        }
+-        if (startWith(line, startPosition, "MD")) {
+-            MD.loadString(line->substr(startPosition + 5, endPosition - startPosition - 5));
+-        } else if (startWith(line, startPosition, "NM")) {
+-            NH = stoi(line->substr(startPosition + 5, endPosition - startPosition - 5));
+-        } else if (startWith(line, startPosition, "YZ")) {
+-            strand = line->at(endPosition-1);
++
++            if (endPosition == line->size()) 
++            {break;}
+         }
+      }
+ 
+diff --git a/hisat_3n_table.cpp b/hisat_3n_table.cpp
+index 0168af2..4c8f748 100644
+--- a/hisat_3n_table.cpp
++++ b/hisat_3n_table.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include <iostream>
+ #include <getopt.h>
++#include <list>
++#include <map>
+ #include "position_3n_table.h"
+ 
+ using namespace std;
+@@ -32,7 +34,7 @@ bool uniqueOnly = false;
+ bool multipleOnly = false;
+ bool CG_only = false;
+ int nThreads = 1;
+# 减小 loadingBlockSize，提升内存访问局部性，提高缓存命中率
+-long long int loadingBlockSize = 1000000;
++long long int loadingBlockSize = 12000;
+ char convertFrom = '0';
+ char convertTo = '0';
+ char convertFromComplement;
+@@ -41,7 +43,6 @@ bool addedChrName = false;
+ bool removedChrName = false;
+ 
+ 
+-Positions* positions;
+ 
+ bool fileExist (string& filename) {
+     ifstream file(filename);
+@@ -208,16 +209,16 @@ static void parseOptions(int argc, const char **argv) {
+  * give a SAM line, extract the chromosome and position information.
+  * return true if the SAM line is mapped. return false if SAM line is not maped.
+  */
+-bool getSAMChromosomePos(string* line, string& chr, long long int& pos) {
++bool getSAMChromosomePos(const string &line, string& chr, long long int& pos) {
+     int startPosition = 0;
+     int endPosition = 0;
+     int count = 0;
+ 
+-    while ((endPosition = line->find("\t", startPosition)) != string::npos) {
++    while ((endPosition = line.find("\t", startPosition)) != string::npos) {
+         if (count == 2) {
+-            chr = line->substr(startPosition, endPosition - startPosition);
++            chr = line.substr(startPosition, endPosition - startPosition);
+         } else if (count == 3) {
+-            pos = stoll(line->substr(startPosition, endPosition - startPosition));
++            pos = stoll(line.substr(startPosition, endPosition - startPosition));
+             if (chr == "*") {
+                 return false;
+             } else {
+@@ -230,133 +231,127 @@ bool getSAMChromosomePos(string* line, string& chr, long long int& pos) {
+     return false;
+ }
+
+# 为了流程的统一性，及优化输入输出时方便起见，统一使用标准输入/输出
+ 
+-/*void opeInFile(ifstream& f) {
+-    if (alignmentFileName == "-") {
+-        f = cin;
+-    } else {
+-        ifstream alignmentFile;
+-        alignmentFile.open(alignmentFileName, ios_base::in);
+-        return alignmentFile;
+-    }
+-}*/
+-
+# 修改后的任务线程，由于不同染色体上的点位在构建 table 时彼此独立，故根据染色体编号划分任务，每个 worker 处理一个或多个染色体上的全部点位。
++struct Worker : public SPSCWorker<vector<string>>
++{
+# 每个任务线程各自拥有一份对 Positions 的引用。
++	Positions *positions = nullptr;
++	Alignment newAlignment;
++	long long int reloadPos; // the position in reference that we need to reload.
++	long long int lastPos = 0; // the position on last SAM line. compare lastPos with samPos to make sure the SAM is sorted.
++	size_t load = 0;
++
+# 为了提升多线程性能，减少锁占用时间，将主线程提交的点位信息缓存，每次一次性提交 100000 个点位信息给工作线程。
++	vector<string> buffer;
++
++	Worker() : 
+# 线程初始化时，先读入 positions
++		SPSCWorker<vector<string>>([this] {
++			positions = new Positions(refFileName, addedChrName, removedChrName);
++		}, [this](vector<string> lines) {
++			for (auto &&line: lines)
++			{
+# 对于每个点位的处理流程，与原先主进程中的处理流程相同。
++				string samChromosome; // the chromosome name of current SAM line.
++				long long int samPos; // the position of current SAM line.
++				getSAMChromosomePos(line, samChromosome, samPos);
++
++				// if the samChromosome is different than current positions' chromosome, finish all SAM line.
++				// then load a new reference chromosome.
++				if (samChromosome != positions->chromosome) {
++					positions->moveAllToOutput();
++					positions->loadNewChromosome(samChromosome);
++					reloadPos = loadingBlockSize;
++					lastPos = 0;
++				}
++				// if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
++				while (samPos > reloadPos) {
++					positions->moveBlockToOutput();
++					positions->loadMore();
++					reloadPos += loadingBlockSize;
++				}
++
++				// work on this line
++				newAlignment.parse(&line);
++				positions->appendPositions(newAlignment);
++				lastPos = samPos;
++			}
++		})
++	{}
++
++	void flush()
++	{
++		vector<string> ve;
++		swap(buffer, ve);
++		SPSCWorker<vector<string>>::push(std::move(ve));
++	}
++
++	~Worker() 
++	{
++		flush();
++		join();
++    positions->moveAllToOutput();
++		delete positions;
++	}
++
++	template <class P>
++	void push(P &&data)
++	{
++		load++;
++		buffer.emplace_back(std::forward<P>(data));
++		if (buffer.size() > 100000)
++			flush();
++	}
++};
+ 
+ int hisat_3n_table()
+ {
+-    positions = new Positions(refFileName, nThreads, addedChrName, removedChrName);
+-
+-    // open #nThreads workers
+-    vector<thread*> workers;
+-    for (int i = 0; i < nThreads; i++) {
+-        workers.push_back(new thread(&Positions::append, positions, i));
+-    }
++		cout << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
+ 
+-    // open a output thread
+-    thread outputThread;
+-    outputThread = thread(&Positions::outputFunction, positions, outputFileName);
++		list<Worker> workers(nThreads);
+# 当出现一个新染色体时，分配给一个负载最小的线程
++		auto find_worker = [&workers]() {
++			return &*min_element(workers.begin(), workers.end(), [](const Worker& lhs, const Worker &rhs) {
++				return lhs.load < rhs.load;
++			});
++		};
++		map<string, Worker *> assigned_worker;
+ 
+     // main function, initially 2 load loadingBlockSize (2,000,000) bp of reference, set reloadPos to 1 loadingBlockSize, then load SAM data.
+     // when the samPos larger than the reloadPos load 1 loadingBlockSize bp of reference.
+     // when the samChromosome is different to current chromosome, finish all sam position and output all.
+-    ifstream inputFile;
+-    istream *alignmentFile = &cin;
+-    if (!standardInMode) {
+-        inputFile.open(alignmentFileName, ios_base::in);
+-        alignmentFile = &inputFile;
+-    }
+ 
+-    string* line; // temporary string to get SAM line.
+-    string samChromosome; // the chromosome name of current SAM line.
+-    long long int samPos; // the position of current SAM line.
+-    long long int reloadPos; // the position in reference that we need to reload.
+-    long long int lastPos = 0; // the position on last SAM line. compare lastPos with samPos to make sure the SAM is sorted.
++		static char buff[1000000];
+ 
+-    while (alignmentFile->good()) {
+-        positions->getFreeStringPointer(line);
+-        if (!getline(*alignmentFile, *line)) {
+-            positions->returnLine(line);
+-            break;
+-        }
+# 使用 fgets 加快读入速度
++    while (true) {
++				if (fgets(buff, sizeof(buff), stdin) == NULL)
++					break;
+ 
+-        if (line->empty() || line->front() == '@') {
+-            positions->returnLine(line);
++				string line(buff); 
++        if (line.empty() || line.front() == '@') {
+             continue;
+         }
+-        // limit the linePool size to save memory
+-        while(positions->linePool.size() > 1000 * nThreads) {
+-            this_thread::sleep_for (std::chrono::microseconds(1));
+-        }
++
++				string samChromosome; // the chromosome name of current SAM line.
++				long long int samPos; // the position of current SAM line.
+         // if the SAM line is empty or unmapped, get the next SAM line.
+         if (!getSAMChromosomePos(line, samChromosome, samPos)) {
+-            positions->returnLine(line);
+             continue;
+         }
+-        // if the samChromosome is different than current positions' chromosome, finish all SAM line.
+-        // then load a new reference chromosome.
+-        if (samChromosome != positions->chromosome) {
+-            // wait all line is processed
+-            while (!positions->linePool.empty() || positions->outputPositionPool.size() > 100000) {
+-                this_thread::sleep_for (std::chrono::microseconds(1));
+-            }
+-            positions->appendingFinished();
+-            positions->moveAllToOutput();
+-            positions->loadNewChromosome(samChromosome);
+-            reloadPos = loadingBlockSize;
+-            lastPos = 0;
+-        }
+-        // if the samPos is larger than reloadPos, load 1 loadingBlockSize bp in from reference.
+-        while (samPos > reloadPos) {
+-            while (!positions->linePool.empty() || positions->outputPositionPool.size() > 100000) {
+-                this_thread::sleep_for (std::chrono::microseconds(1));
+-            }
+-            positions->appendingFinished();
+-            positions->moveBlockToOutput();
+-            positions->loadMore();
+-            reloadPos += loadingBlockSize;
+-        }
+-        if (lastPos > samPos) {
+-            cerr << "The input alignment file is not sorted. Please use sorted SAM file as alignment file." << endl;
+-            throw 1;
+-        }
+-        positions->linePool.push(line);
+-        lastPos = samPos;
+-    }
+-    //}
+-    if (!standardInMode) {
+-        inputFile.close();
+-    }
+-
+ 
+-    // prepare to close everything.
+-
+-    // make sure linePool is empty
+-    while (!positions->linePool.empty()) {
+-        this_thread::sleep_for (std::chrono::microseconds(100));
+-    }
+-    // make sure all workers finished their appending work.
+-    positions->appendingFinished();
+-    // move all position to outputPool
+-    positions->moveAllToOutput();
+-    // wait until outputPool is empty
+-    while (!positions->outputPositionPool.empty()) {
+-        this_thread::sleep_for (std::chrono::microseconds(100));
+-    }
+-    // stop all thread and clean
+-    while(positions->freeLinePool.popFront(line)) {
+-        delete line;
+# 分配工作线程
++				auto it = assigned_worker.find(samChromosome);
++				if (it != assigned_worker.end()) {
++					it->second->push(std::move(line));
++				}
++				else {
++					auto worker = find_worker();
++					cerr << "assign chromosome " << samChromosome << " to thread " << worker->get_id() << endl;
++					assigned_worker[samChromosome] = worker;
++					worker->push(std::move(line));
++				}
+     }
+-    positions->working = false;
+-    for (int i = 0; i < nThreads; i++){
+-        workers[i]->join();
+-        delete workers[i];
+-    }
+-    outputThread.join();
+-    delete positions;
++
+     return 0;
+ }
+ 
++
+ int main(int argc, const char** argv)
+ {
++    ios::sync_with_stdio(false);
+     int ret = 0;
+ 
+     try {
+diff --git a/position_3n_table.h b/position_3n_table.h
+index 2a0c99d..9eb321f 100644
+--- a/position_3n_table.h
++++ b/position_3n_table.h
+@@ -60,21 +60,20 @@ public:
+ class Position{
+     mutex mutex_;
+ public:
+-    string chromosome; // reference chromosome name
++    short chromosomeId;
+     long long int location; // 1-based position
+     char strand; // +(REF) or -(REF-RC)
+-    string convertedQualities; // each char is a mapping quality on this position for converted base.
+-    string unconvertedQualities; // each char is a mapping quality on this position for unconverted base.
+-    vector<uniqueID> uniqueIDs; // each value represent a readName which contributed the base information.
+-                              // readNameIDs is to make sure no read contribute 2 times in same position.
++    int convertedCount = 0;
++    int unconvertedCount = 0;
++    bool empty = true;
+ 
+     void initialize() {
+-        chromosome.clear();
++        chromosomeId = -1;
+         location = -1;
+         strand = '?';
+-        convertedQualities.clear();
+-        unconvertedQualities.clear();
+-        vector<uniqueID>().swap(uniqueIDs);
++        convertedCount = 0;
++        unconvertedCount = 0;
++        empty = true;
+     }
+ 
+     Position(){
+@@ -84,16 +83,16 @@ public:
+     /**
+      * return true if there is mapping information in this reference position.
+      */
+-    bool empty() {
+-        return convertedQualities.empty() && unconvertedQualities.empty();
++    bool isEmpty() const {
++        return empty;
+     }
+ 
+     /**
+      * set the chromosome, location (position), and strand information.
+      */
+ 
+-    void set (string& inputChr, long long int inputLoc) {
+-        chromosome = inputChr;
++    void set (int InChromosomeId, long long int inputLoc) {
++        chromosomeId = InChromosomeId;
+         location = inputLoc + 1;
+     }
+ 
+@@ -101,85 +100,18 @@ public:
+         strand = inputStrand;
+     }
+ 
+-    /**
+-     * binary search of readNameID in readNameIDs.
+-     * always return a index.
+-     * if cannot find, return the index which has bigger value than input readNameID.
+-     */
+-    int searchReadNameID (unsigned long long&readNameID, int start, int end) {
+-        if (uniqueIDs.empty()) {
+-            return 0;
+-        }
+-        if (start <= end) {
+-            int middle = (start + end) / 2;
+-            if (uniqueIDs[middle].readNameID == readNameID) {
+-                return middle;
+-            }
+-            if (uniqueIDs[middle].readNameID > readNameID) {
+-                return searchReadNameID(readNameID, start, middle-1);
+-            }
+-            return searchReadNameID(readNameID, middle+1, end);
+-        }
+-        return start; // return the bigger one
+-    }
+-
+-
+-    /**
+-     * with a input readNameID, add it into readNameIDs.
+-     * if the input readNameID already exist in readNameIDs, return false.
+-     */
+-    bool appendReadNameID(PosQuality& InBase, Alignment& InAlignment) {
+-        int idCount = uniqueIDs.size();
+-        if (idCount == 0 || InAlignment.readNameID > uniqueIDs.back().readNameID) {
+-            uniqueIDs.emplace_back(InAlignment.readNameID, InBase.converted, InBase.qual);
+-            return true;
+-        }
+-        int index = searchReadNameID(InAlignment.readNameID, 0, idCount);
+-        if (uniqueIDs[index].readNameID == InAlignment.readNameID) {
+-            // if the new base is consistent with exist base's conversion status, ignore
+-            // otherwise, delete the exist conversion status
+-            if (uniqueIDs[index].removed) {
+-                return false;
+-            }
+-            if (uniqueIDs[index].isConverted != InBase.converted) {
+-                uniqueIDs[index].removed = true;
+-                if (uniqueIDs[index].isConverted) {
+-                    for (int i = 0; i < convertedQualities.size(); i++) {
+-                        if (convertedQualities[i] == InBase.qual) {
+-                            convertedQualities.erase(convertedQualities.begin()+i);
+-                            return false;
+-                        }
+-                    }
+-                } else {
+-                    for (int i = 0; i < unconvertedQualities.size(); i++) {
+-                        if (unconvertedQualities[i] == InBase.qual) {
+-                            unconvertedQualities.erase(unconvertedQualities.begin()+i);
+-                            return false;
+-                        }
+-                    }
+-                }
+-            }
+-            return false;
+-        } else {
+-            uniqueIDs.emplace(uniqueIDs.begin()+index, InAlignment.readNameID, InBase.converted, InBase.qual);
+-            return true;
+-        }
+-    }
+-
+     /**
+      * append the SAM information into this position.
+      */
+     void appendBase (PosQuality& input, Alignment& a) {
+-        mutex_.lock();
+-        if (appendReadNameID(input,a)) {
++            if (empty) empty = false;
+             if (input.converted) {
+-                convertedQualities += input.qual;
++                convertedCount++;
+             } else {
+-                unconvertedQualities += input.qual;
++                unconvertedCount++;
+             }
+-        }
+-        mutex_.unlock();
+     }
++
+ };
+ 
+ /**
+@@ -188,39 +120,28 @@ public:
+ class Positions{
+ public:
+     vector<Position*> refPositions; // the pool of all current reference position.
+-    string chromosome; // current reference chromosome name.
++    string chromosome; // current reference chromosome name.'
++    int curChromosomeId;
+     long long int location; // current location (position) in reference chromosome.
+     char lastBase = 'X'; // the last base of reference line. this is for CG_only mode.
+# 删除原先所有线程共用的内存池和输出队列，避免等待锁的开销
+-    SafeQueue<string*> linePool; // pool to store unprocessed SAM line.
+-    SafeQueue<string*> freeLinePool; // pool to store free string pointer for SAM line.
+-    SafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
+-    SafeQueue<Position*> outputPositionPool; // pool to store the reference position which is loaded and ready to output.
+-    bool working;
+-    mutex mutex_;
+# 由当前线程独享的内存池
++    UnsafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
+     long long int refCoveredPosition; // this is the last position in reference chromosome we loaded in refPositions.
+     ifstream refFile;
+-    vector<mutex*> workerLock; // one lock for one worker thread.
+-    int nThreads = 1;
+     ChromosomeFilePositions chromosomePos; // store the chromosome name and it's streamPos. To quickly find new chromosome in file.
+     bool addedChrName = false;
+     bool removedChrName = false;
++		
++		BufferedOutput out;
+ 
+-    Positions(string inputRefFileName, int inputNThreads, bool inputAddedChrName, bool inputRemovedChrName) {
+-        working = true;
+-        nThreads = inputNThreads;
++    Positions(string inputRefFileName, bool inputAddedChrName, bool inputRemovedChrName)
++			: out(cout, 10000) {
+         addedChrName = inputAddedChrName;
+         removedChrName = inputRemovedChrName;
+-        for (int i = 0; i < nThreads; i++) {
+-            workerLock.push_back(new mutex);
+-        }
+         refFile.open(inputRefFileName, ios_base::in);
+         LoadChromosomeNamesPos();
+     }
+ 
+     ~Positions() {
+-        for (int i = 0; i < workerLock.size(); i++) {
+-            delete workerLock[i];
+-        }
+         Position* pos;
+         while(freePositionPool.popFront(pos)) {
+             delete pos;
+@@ -284,71 +205,47 @@ public:
+      * get a fasta line (not header), append the bases to positions.
+      */
+     void appendRefPosition(string& line) {
+-        Position* newPos;
++        
+         // check the base one by one
+-        char* b;
+-        for (int i = 0; i < line.size(); i++) {
++        int len = line.size();
++
++        refPositions.reserve(refPositions.size() + len);
++        
++        Position* newPos;
++
++        #pragma unroll
++        for (int i = 0; i < len; i++) {
+             getFreePosition(newPos);
+-            newPos->set(chromosome, location+i);
+-            b = &line[i];
++            newPos->set(curChromosomeId, location+i);
++            char b = line[i];
+             if (CG_only) {
+-                if (lastBase == 'C' && *b == 'G') {
++                if (lastBase == 'C' && b == 'G') {
+                     refPositions.back()->set('+');
+                     newPos->set('-');
+                 }
+             } else {
+-                if (*b == convertFrom) {
++                if (b == convertFrom) {
+                     newPos->set('+');
+-                } else if (*b == convertFromComplement) {
++                } else if (b == convertFromComplement) {
+                     newPos->set('-');
+                 }
+             }
+             refPositions.push_back(newPos);
+-            lastBase = *b;
+-        }
+-        location += line.size();
+-    }
+-
+-    /**
+-     * if we can go through all the workerLock, that means no worker is appending new position.
+-     */
+-    void appendingFinished() {
+-        for (int i = 0; i < nThreads; i++) {
+-            workerLock[i]->lock();
+-            workerLock[i]->unlock();
++            lastBase = b;
+         }
++        location += len;
+     }
+ 
+-    /**
+-     * the output function for output thread.
+-     */
+-    void outputFunction(string outputFileName) {
+-        ostream* out_ = &cout;
+-        out_ = &cout;
+-        ofstream tableFile;
+-        if (!outputFileName.empty()) {
+-            tableFile.open(outputFileName, ios_base::out);
+-            out_ = &tableFile;
+-        }
+-
+-        *out_ << "ref\tpos\tstrand\tconvertedBaseQualities\tconvertedBaseCount\tunconvertedBaseQualities\tunconvertedBaseCount\n";
+-        Position* pos;
+-        while (working) {
+-            if (outputPositionPool.popFront(pos)) {
+-                *out_ << pos->chromosome << '\t'
+-                          << to_string(pos->location) << '\t'
+-                          << pos->strand << '\t'
+-                          << pos->convertedQualities << '\t'
+-                          << to_string(pos->convertedQualities.size()) << '\t'
+-                          << pos->unconvertedQualities << '\t'
+-                          << to_string(pos->unconvertedQualities.size()) << '\n';
+-                returnPosition(pos);
+-            } else {
+-                this_thread::sleep_for (std::chrono::microseconds(1));
+-            }
+-        }
+-        tableFile.close();
+-    }
+# 在工作线程中进行输出，减少线程同步的开销
++		void output_pos(const Position *pos)
++		{
++				if (!pos->isEmpty() && pos->strand != '?') {
++						out.lock() << chromosomePos.getChromesomeString(pos->chromosomeId) << '\t'
++											 << pos->location << '\t'
++											 << pos->strand << '\t' 
++											 << pos->convertedCount << '\t' 
++											 << pos->unconvertedCount << '\n';
++				}
++		}
+ 
+     /**
+      * move the position which position smaller than refCoveredPosition - loadingBlockSize, output it.
+@@ -358,13 +255,11 @@ public:
+             return;
+         }
+         int index;
+-        for (index = 0; index < refPositions.size(); index++) {
++        int len = refPositions.size();
++        for (index = 0; index < len; index++) {
+             if (refPositions[index]->location < refCoveredPosition - loadingBlockSize) {
+-                if (refPositions[index]->empty() || refPositions[index]->strand == '?') {
+-                    returnPosition(refPositions[index]);
+-                } else {
+-                    outputPositionPool.push(refPositions[index]);
+-                }
+# 直接在当前线程输出
++								output_pos(refPositions[index]);
++								returnPosition(refPositions[index]);
+             } else {
+                 break;
+             }
+@@ -382,12 +277,8 @@ public:
+             return;
+         }
+         for (int index = 0; index < refPositions.size(); index++) {
+-            if (refPositions[index]->empty() || refPositions[index]->strand == '?') {
+-                returnPosition(refPositions[index]);
+-            } else {
+-                vector<uniqueID>().swap(refPositions[index]->uniqueIDs);
+-                outputPositionPool.push(refPositions[index]);
+-            }
+# 直接在当前线程输出
++						output_pos(refPositions[index]);
++						returnPosition(refPositions[index]);
+         }
+         refPositions.clear();
+     }
+@@ -400,6 +291,7 @@ public:
+         // find the start position in file based on chromosome name.
+         streampos startPos = chromosomePos.getChromosomePosInRefFile(targetChromosome);
+         chromosome = targetChromosome;
++        curChromosomeId = chromosomePos.findChromosome(targetChromosome, 0, chromosomePos.pos.size()-1);
+         refFile.seekg(startPos, ios::beg);
+         refCoveredPosition = 2 * loadingBlockSize;
+         string line;
+@@ -479,24 +371,11 @@ public:
+         }
+     }
+ 
+# 删除不必要的内存池
+-    /**
+-     * get a string pointer from freeLinePool, if freeLinePool is empty, make a new string pointer.
+-     */
+-    void getFreeStringPointer(string*& newLine) {
+-        if (freeLinePool.popFront(newLine)) {
+-            return;
+-        } else {
+-            newLine = new string();
+-        }
+-    }
+-
+     /**
+      * get a Position pointer from freePositionPool, if freePositionPool is empty, make a new Position pointer.
+      */
++    // 一次取一行
+     void getFreePosition(Position*& newPosition) {
+# 删除不必要的等待
+-        while (outputPositionPool.size() >= 10000) {
+-            this_thread::sleep_for (std::chrono::microseconds(1));
+-        }
+         if (freePositionPool.popFront(newPosition)) {
+             return;
+         } else {
+@@ -504,14 +383,6 @@ public:
+         }
+     }
+
+# 删除不必要的内存池
+-    /**
+-     * return the line to freeLinePool
+-     */
+-    void returnLine(string* line) {
+-        line->clear();
+-        freeLinePool.push(line);
+-    }
+-
+     /**
+      * return the position to freePositionPool.
+      */
+@@ -519,31 +390,6 @@ public:
+         pos->initialize();
+         freePositionPool.push(pos);
+     }
+
+# 删除原先的工作线程，相应逻辑合并进入现在的工作线程 Worker 中
+-
+-    /**
+-     * this is the working function.
+-     * it take the SAM line from linePool, parse it.
+-     */
+-    void append(int threadID) {
+-        string* line;
+-        Alignment newAlignment;
+-
+-        while (working) {
+-            workerLock[threadID]->lock();
+-            if(!linePool.popFront(line)) {
+-                workerLock[threadID]->unlock();
+-                this_thread::sleep_for (std::chrono::nanoseconds(1));
+-                continue;
+-            }
+-            while (refPositions.empty()) {
+-                this_thread::sleep_for (std::chrono::microseconds(1));
+-            }
+-            newAlignment.parse(line);
+-            returnLine(line);
+-            appendPositions(newAlignment);
+-            workerLock[threadID]->unlock();
+-        }
+-    }
+ };
+ 
+ #endif //POSITION_3N_TABLE_H
+diff --git a/utility_3n_table.h b/utility_3n_table.h
+index 33a086e..c45cb99 100644
+--- a/utility_3n_table.h
++++ b/utility_3n_table.h
+@@ -23,6 +23,10 @@
+ #include <mutex>
+ #include <queue>
+ #include <algorithm>
++#include <ostream>
++#include <sstream>
++#include <thread>
++#include <functional>
+ 
+ using namespace std;
+ 
+@@ -189,9 +193,8 @@ public:
+  * simple safe queue
+  */
+ template <typename T>
+# 不使用锁的单线程队列，保留了原有的接口不变
+-class SafeQueue {
++class UnsafeQueue {
+ private:
+-    mutex mutex_;
+     queue<T> queue_;
+ 
+     string getReadName(string* line){
+@@ -204,23 +207,12 @@ private:
+     }
+ 
+ public:
+-    void pop() {
+-        mutex_.lock();
+-        queue_.pop();
+-        mutex_.unlock();
+-    }
+ 
+-    T front() {
+-        mutex_.lock();
+-        T value = queue_.front();
+-        mutex_.unlock();
+-        return value;
+-    }
++
+ 
+     int size() {
+-        mutex_.lock();
++
+         int s = queue_.size();
+-        mutex_.unlock();
+         return s;
+     }
+ 
+@@ -229,26 +221,25 @@ public:
+      * return false if the queue is empty.
+      */
+     bool popFront(T& value) {
+-        mutex_.lock();
++
+         bool isEmpty = queue_.empty();
+         if (!isEmpty) {
+             value = queue_.front();
+             queue_.pop();
+         }
+-        mutex_.unlock();
+         return !isEmpty;
+     }
+ 
+     void push(T value) {
+-        mutex_.lock();
++
+         queue_.push(value);
+-        mutex_.unlock();
++
+     }
+ 
+     bool empty() {
+-        mutex_.lock();
++
+         bool check = queue_.empty();
+-        mutex_.unlock();
++
+         return check;
+     }
+ };
+@@ -284,6 +275,9 @@ public:
+         pos.push_back(ChromosomeFilePosition(chromosome, linePos));
+     }
+ 
++    const string& getChromesomeString(int index) {
++        return pos[index].chromosome;
++    }
+     /**
+      * make binary search on pos for target chromosome name
+      */
+@@ -324,4 +318,129 @@ public:
+         std::sort(pos.begin(), pos.end());
+     }
+ };
++
+# 输出为 tsv 格式，各行之间的顺序可以交换，当前线程只需保证每行的完整性即可
+# 实现了带缓冲区的输出，避免了频繁加锁的开销
++// buffered, shared output
++struct BufferedOutput
++{
++// make gcc-12 happy
++// protected:
++	ostream &output;
++	size_t cnt;
++	size_t capacity;
++	stringstream buffer;
++
++	void flush() {
++		static mutex output_lock;
++		{
++			lock_guard<mutex> _(output_lock);
++			output << buffer.rdbuf();
++		}
++		buffer.str(""); // clear buffer
++		cnt = 0;
++	}
++
++public:
++	struct BufferedOutputLock
++	{
++		BufferedOutput *output;
++
++		~BufferedOutputLock()
++		{
++			if (output->cnt >= output->capacity)
++				output->flush();
++		}
++
++		template <class T>
++		friend BufferedOutputLock &&operator<<(BufferedOutputLock &&self, T &&data)
++		{
++			self.output->buffer << std::forward<T>(data);
++			self.output->cnt++;
++			return std::move(self);
++		}
++	};
++
++	BufferedOutput(ostream &output, size_t capacity):
++		output(output), cnt(0), capacity(capacity) 
++	{}
++
++	~BufferedOutput()
++	{
++		flush();
++	}
++
++	BufferedOutputLock lock()
++	{
++		return {this};
++	}
++};
++
++
++template <class T>
++struct SPSCWorker
++{
++protected:
++	queue<T> que;
++	mutex que_lock;
++	function<void()> initial_func;
++	function<void(T)> consumer_func;
++	bool consumer_working;
++	thread consumer_thread;
++
++	void consumer()
++	{
++		initial_func();
++		while (true)
++		{
++			que_lock.lock();
++			if (que.empty()) 
++			{
++				if (consumer_working)
++				{
++					que_lock.unlock();
++					this_thread::sleep_for (chrono::microseconds(1));
++				}
++				else
++				{
++					que_lock.unlock();
++					return;
++				}
++			}
++			else
++			{
++				auto data = std::move(que.front());
++				que.pop();
++				que_lock.unlock();
++				consumer_func(std::move(data));
++			}
++		}
++	}
++
++public:
++	template <class Fi, class Fc>
++	SPSCWorker(Fi &&fi, Fc &&fc) :
++		initial_func(std::forward<Fi>(fi)),
++		consumer_func(std::forward<Fc>(fc)),
++		consumer_working(true),
++		consumer_thread(&SPSCWorker<T>::consumer, this)
++	{}
++
++	void join()
++	{
++		consumer_working = false;
++		consumer_thread.join();
++	}
++
++	template <class P>
++	void push(P &&data)
++	{
++		lock_guard<mutex> _(que_lock);
++		que.emplace(std::forward<P>(data));
++	}
++
++	auto get_id() -> decltype(consumer_thread.get_id())
++	{
++		return consumer_thread.get_id();
++	}
++};
++
+ #endif //UTILITY_3N_TABLE_H
