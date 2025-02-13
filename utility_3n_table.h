@@ -244,69 +244,6 @@ public:
     }
 };
 
-template <typename T>
-class SafeQueue {
-private:
-    mutex mutex_;
-    queue<T> queue_;
-
-    string getReadName(string* line){
-        int startPosition = 0;
-        int endPosition;
-
-        endPosition = line->find("\t", startPosition);
-        string readName = line->substr(startPosition, endPosition - startPosition);
-        return readName;
-    }
-
-public:
-    void pop() {
-        mutex_.lock();
-        queue_.pop();
-        mutex_.unlock();
-    }
-
-    T front() {
-        mutex_.lock();
-        T value = queue_.front();
-        mutex_.unlock();
-        return value;
-    }
-
-    int size() {
-        int s = queue_.size();
-        return s;
-    }
-
-    /**
-     * return true if the queue is not empty and pop front and get value.
-     * return false if the queue is empty.
-     */
-    bool popFront(T& value) {
-        mutex_.lock();
-        bool isEmpty = queue_.empty();
-        if (!isEmpty) {
-            value = queue_.front();
-            queue_.pop();
-        }
-        mutex_.unlock();
-        return !isEmpty;
-    }
-
-    void push(T value) {
-        mutex_.lock();
-        queue_.push(value);
-        mutex_.unlock();
-    }
-
-    bool empty() {
-        mutex_.lock();
-        bool check = queue_.empty();
-        mutex_.unlock();
-        return check;
-    }
-};
-
 /**
  * store one chromosome and it's stream position
  */
@@ -498,6 +435,11 @@ public:
 	{
 		lock_guard<mutex> _(que_lock);
 		que.emplace(std::forward<P>(data));
+	}
+
+	auto get_id() -> decltype(consumer_thread.get_id())
+	{
+		return consumer_thread.get_id();
 	}
 };
 

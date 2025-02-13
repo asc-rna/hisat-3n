@@ -231,16 +231,6 @@ bool getSAMChromosomePos(const string &line, string& chr, long long int& pos) {
     return false;
 }
 
-/*void opeInFile(ifstream& f) {
-    if (alignmentFileName == "-") {
-        f = cin;
-    } else {
-        ifstream alignmentFile;
-        alignmentFile.open(alignmentFileName, ios_base::in);
-        return alignmentFile;
-    }
-}*/
-
 struct Worker : public SPSCWorker<vector<string>>
 {
 	Positions *positions = nullptr;
@@ -349,7 +339,7 @@ int hisat_3n_table()
 				}
 				else {
 					auto worker = find_worker();
-					cerr << "assign chromosome " << samChromosome << " to" << worker << endl;
+					cerr << "assign chromosome " << samChromosome << " to thread " << worker->get_id() << endl;
 					assigned_worker[samChromosome] = worker;
 					worker->push(std::move(line));
 				}

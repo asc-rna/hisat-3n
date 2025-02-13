@@ -60,29 +60,20 @@ public:
 class Position{
     mutex mutex_;
 public:
-    // string chromosome; // reference chromosome name
     short chromosomeId;
     long long int location; // 1-based position
     char strand; // +(REF) or -(REF-RC)
-    // string convertedQualities; // each char is a mapping quality on this position for converted base.
-    // string unconvertedQualities; // each char is a mapping quality on this position for unconverted base.
     int convertedCount = 0;
     int unconvertedCount = 0;
     bool empty = true;
-    // vector<uniqueID> uniqueIDs; // each value represent a readName which contributed the base information.
-    //                           // readNameIDs is to make sure no read contribute 2 times in same position.
 
     void initialize() {
-        // chromosome.clear();
         chromosomeId = -1;
         location = -1;
         strand = '?';
-        // convertedQualities.clear();
-        // unconvertedQualities.clear();
         convertedCount = 0;
         unconvertedCount = 0;
         empty = true;
-        // vector<uniqueID>().swap(uniqueIDs);
     }
 
     Position(){
@@ -93,7 +84,6 @@ public:
      * return true if there is mapping information in this reference position.
      */
     bool isEmpty() const {
-        // return convertedQualities.empty() && unconvertedQualities.empty();
         return empty;
     }
 
@@ -101,95 +91,25 @@ public:
      * set the chromosome, location (position), and strand information.
      */
 
-    inline void set (int InChromosomeId, long long int inputLoc) {
+    void set (int InChromosomeId, long long int inputLoc) {
         chromosomeId = InChromosomeId;
         location = inputLoc + 1;
     }
 
-    inline void set(char inputStrand) {
+    void set(char inputStrand) {
         strand = inputStrand;
     }
-
-    /**
-     * binary search of readNameID in readNameIDs.
-     * always return a index.
-     * if cannot find, return the index which has bigger value than input readNameID.
-     */
-    // int searchReadNameID (unsigned long long&readNameID, int start, int end) {
-    //     if (uniqueIDs.empty()) {
-    //         return 0;
-    //     }
-    //     if (start <= end) {
-    //         int middle = (start + end) / 2;
-    //         if (uniqueIDs[middle].readNameID == readNameID) {
-    //             return middle;
-    //         }
-    //         if (uniqueIDs[middle].readNameID > readNameID) {
-    //             return searchReadNameID(readNameID, start, middle-1);
-    //         }
-    //         return searchReadNameID(readNameID, middle+1, end);
-    //     }
-    //     return start; // return the bigger one
-    // }
-
-
-    /**
-     * with a input readNameID, add it into readNameIDs.
-     * if the input readNameID already exist in readNameIDs, return false.
-     */
-    // bool appendReadNameID(PosQuality& InBase, Alignment& InAlignment) {
-    //     int idCount = uniqueIDs.size();
-    //     if (idCount == 0 || InAlignment.readNameID > uniqueIDs.back().readNameID) {
-    //         uniqueIDs.emplace_back(InAlignment.readNameID, InBase.converted, InBase.qual);
-    //         return true;
-    //     }
-    //     int index = searchReadNameID(InAlignment.readNameID, 0, idCount);
-    //     if (uniqueIDs[index].readNameID == InAlignment.readNameID) {
-    //         // if the new base is consistent with exist base's conversion status, ignore
-    //         // otherwise, delete the exist conversion status
-    //         if (uniqueIDs[index].removed) {
-    //             return false;
-    //         }
-    //         if (uniqueIDs[index].isConverted != InBase.converted) {
-    //             uniqueIDs[index].removed = true;
-    //             if (uniqueIDs[index].isConverted) {
-    //                 for (int i = 0; i < convertedQualities.size(); i++) {
-    //                     if (convertedQualities[i] == InBase.qual) {
-    //                         convertedQualities.erase(convertedQualities.begin()+i);
-    //                         return false;
-    //                     }
-    //                 }
-    //             } else {
-    //                 for (int i = 0; i < unconvertedQualities.size(); i++) {
-    //                     if (unconvertedQualities[i] == InBase.qual) {
-    //                         unconvertedQualities.erase(unconvertedQualities.begin()+i);
-    //                         return false;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         return false;
-    //     } else {
-    //         uniqueIDs.emplace(uniqueIDs.begin()+index, InAlignment.readNameID, InBase.converted, InBase.qual);
-    //         return true;
-    //     }
-    // }
 
     /**
      * append the SAM information into this position.
      */
     void appendBase (PosQuality& input, Alignment& a) {
-        // mutex_.lock();
             if (empty) empty = false;
             if (input.converted) {
-                // convertedQualities += input.qual;
                 convertedCount++;
             } else {
-                // unconvertedQualities += input.qual;
                 unconvertedCount++;
             }
-        
-        // mutex_.unlock();
     }
 
 };
@@ -204,7 +124,6 @@ public:
     int curChromosomeId;
     long long int location; // current location (position) in reference chromosome.
     char lastBase = 'X'; // the last base of reference line. this is for CG_only mode.
-    SafeQueue<string*> freeLinePool; // pool to store free string pointer for SAM line.
     UnsafeQueue<Position*> freePositionPool; // pool to store free position pointer for reference position.
     long long int refCoveredPosition; // this is the last position in reference chromosome we loaded in refPositions.
     ifstream refFile;
@@ -261,7 +180,6 @@ public:
                 name = string("chr") + name;
             }
         }
-        // cout << "chromosome name: " << name << endl;
         return name;
     }
 
@@ -286,7 +204,7 @@ public:
     /**
      * get a fasta line (not header), append the bases to positions.
      */
-    inline void appendRefPosition(string& line) {
+    void appendRefPosition(string& line) {
         
         // check the base one by one
         int len = line.size();
@@ -454,17 +372,6 @@ public:
     }
 
     /**
-     * get a string pointer from freeLinePool, if freeLinePool is empty, make a new string pointer.
-     */
-    void getFreeStringPointer(string*& newLine) {
-        if (freeLinePool.popFront(newLine)) {
-            return;
-        } else {
-            newLine = new string();
-        }
-    }
-
-    /**
      * get a Position pointer from freePositionPool, if freePositionPool is empty, make a new Position pointer.
      */
     // 一次取一行
@@ -474,14 +381,6 @@ public:
         } else {
             newPosition = new Position();
         }
-    }
-
-    /**
-     * return the line to freeLinePool
-     */
-    void returnLine(string* line) {
-        line->clear();
-        freeLinePool.push(line);
     }
 
     /**
