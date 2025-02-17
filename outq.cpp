@@ -24,8 +24,8 @@
  * the read with the given id.
  */
 void OutputQueue::beginRead(TReadId rdid, size_t threadId) {
-	ThreadSafe t(&mutex_m, threadSafe_);
-	nstarted_++;
+	// ThreadSafe t(&mutex_m, threadSafe_);
+	// nstarted_++;
 	if(reorder_) {
 		assert_geq(rdid, cur_);
 		assert_eq(lines_.size(), finished_.size());
@@ -51,6 +51,7 @@ void OutputQueue::beginRead(TReadId rdid, size_t threadId) {
 void OutputQueue::finishRead(const BTString& rec, TReadId rdid, size_t threadId) {
 	ThreadSafe t(&mutex_m, threadSafe_);
 	if(reorder_) {
+		exit(31); // ensure not happen
 		assert_geq(rdid, cur_);
 		assert_eq(lines_.size(), finished_.size());
 		assert_eq(lines_.size(), started_.size());
