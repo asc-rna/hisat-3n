@@ -18,6 +18,10 @@
  */
 
 #include "outq.h"
+#include "fast_mutex.h"
+#include "filebuf.h"
+#include "sstring.h"
+#include "threading.h"
 
 /**
  * Caller is telling us that they're about to write output record(s) for
@@ -45,11 +49,30 @@ void OutputQueue::beginRead(TReadId rdid, size_t threadId) {
 	}
 }
 
+// Small line buffer, may lost last ~10 lines
+struct LineBuffer {
+	BTString buffer;
+	size_t cnt = 0;
+	
+	void writeString(const BTString &rec, OutFileBuf &obuf, tthread::fast_mutex &mutex) {
+		buffer.append(rec.toZBuf());
+		cnt++;
+		
+		if (cnt > 4) {
+			ThreadSafe _(&mutex, true);
+			obuf.writeString(buffer);
+			buffer.clear();
+			cnt = 0;
+		}
+	}
+};
+
+thread_local LineBuffer buffered_obuf;
+
 /**
  * Writer is finished writing to 
  */
 void OutputQueue::finishRead(const BTString& rec, TReadId rdid, size_t threadId) {
-	ThreadSafe t(&mutex_m, threadSafe_);
 	if(reorder_) {
 		exit(31); // ensure not happen
 		assert_geq(rdid, cur_);
@@ -64,9 +87,9 @@ void OutputQueue::finishRead(const BTString& rec, TReadId rdid, size_t threadId)
 		flush(false, false); // don't force; already have lock
 	} else {
 		// obuf_ is the OutFileBuf for the output file
-		obuf_.writeString(rec);
-		nfinished_++;
-		nflushed_++;
+		buffered_obuf.writeString(rec, obuf_, mutex_m);
+		// nfinished_++;
+		// nflushed_++;
 	}
 }
 
