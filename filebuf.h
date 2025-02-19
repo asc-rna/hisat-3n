@@ -438,7 +438,7 @@ private:
 		// no need to clear _buf[]
 	}
 
-	static const size_t BUF_SZ = 256 * 1024;
+	static const size_t BUF_SZ = 16 * 1024 * 1024;
 	FILE     *_in;
 	std::ifstream *_inf;
 	std::istream  *_ins;
@@ -706,7 +706,7 @@ public:
 
 private:
 
-	static const size_t BUF_SZ = 16 * 1024;
+	static const size_t BUF_SZ = 4 * 1024;
 
 	const char *name_;
 	FILE       *out_;
