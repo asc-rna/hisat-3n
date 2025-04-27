@@ -301,7 +301,7 @@ struct Worker : public SPSCWorker<vector<string>>
 
 int hisat_3n_table()
 {
-		cout << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
+		// cout << "ref\tpos\tstrand\tconvertedBaseCount\tunconvertedBaseCount\n";
 
 		list<Worker> workers(nThreads);
 		auto find_worker = [&workers]() {
@@ -375,3 +375,4 @@ int main(int argc, const char** argv)
 
     return ret;
 }
+
